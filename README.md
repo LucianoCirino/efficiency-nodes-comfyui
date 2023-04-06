@@ -1,6 +1,7 @@
-# efficiency-nodes-comfyui
-A collection of ComfyUI custom nodes to help streamline workflows and reduce node count.
-
+Efficiency Nodes for ComfyUI
+=======
+### A collection of ComfyUI custom nodes to help streamline workflows and reduce node count for <a href="https://github.com/comfyanonymous/ComfyUI" >ComfyUI</a>.
+## [Direct EfficiencyNodes Download Link](https://github.com/LucianoCirino/efficiency-nodes-comfyui/releases/download/v1.0/efficiency-nodes-comfyui.v1.0.zip)
 
 ### **Current Nodes:**
 * Ksampler (Efficient)
@@ -9,7 +10,11 @@ A collection of ComfyUI custom nodes to help streamline workflows and reduce nod
 * Evaluate Integers
 * Evaluate Strings
 
+<br> 
 
+
+### **Examples:**
+  
 *HiResFix example using the 'Efficient Loader' & 'Ksampler (Efficient) nodes'*
 ![HiResFix](https://user-images.githubusercontent.com/112517630/230495296-1d6e9e5d-2b86-4c69-90c7-2ba797b13bf4.png)
 
