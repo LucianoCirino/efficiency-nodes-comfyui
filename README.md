@@ -8,8 +8,13 @@ A collection of ComfyUI custom nodes to help streamline workflows and reduce nod
 3) Image Overlay
 4) Evaluate Integers
 5) Evaluate Strings
+6) <span style="color:blue">1) Ksampler (Efficient)</span>
+<span style="color:blue">2) Efficient Loader</span>
+<span style="color:blue">3) Image Overlay</span>
+<span style="color:blue">4) Evaluate Integers</span>
+<span style="color:blue">5) Evaluate Strings</span>
 
-*HiResFix Example using the Efficient Loader & Ksampler (Efficient) nodes*
+*HiResFix example using the 'Efficient Loader' & 'Ksampler (Efficient) nodes'*
 ![HiResFix](https://user-images.githubusercontent.com/112517630/230495296-1d6e9e5d-2b86-4c69-90c7-2ba797b13bf4.png)
 
 *Image Overlay node example*
