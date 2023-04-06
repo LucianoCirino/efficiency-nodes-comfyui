@@ -1,2 +1,2 @@
 # efficiency-nodes-comfyui
-A collection of ComfyUI custom nodes to help users streamline workflows by reducing total node count.
+A collection of ComfyUI custom nodes that help streamline workflows and reduce node count.
