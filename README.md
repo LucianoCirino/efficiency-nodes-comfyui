@@ -21,4 +21,4 @@ Efficiency Nodes for ComfyUI
 
 
 ## **Install:**
-To install, drop the "_**efficiency-nodes-comfyui**_" folder into "_**...\ComfyUI\ComfyUI\custom_nodes**_" directory and restart UI.
+To install, drop the "_**efficiency-nodes-comfyui**_" folder into the "_**...\ComfyUI\ComfyUI\custom_nodes**_" directory and restart UI.
