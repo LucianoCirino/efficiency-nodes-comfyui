@@ -1,14 +1,14 @@
 # efficiency-nodes-comfyui
 A collection of ComfyUI custom nodes to help streamline workflows and reduce node count.
 
-
+/n
 **Current Nodes:**
 1) Ksampler (Efficient)
 2) Efficient Loader
 3) Image Overlay
 4) Evaluate Integers
 5) Evaluate Strings
-
+/n
 *HiResFix Example using the Efficient Loader & Ksampler (Efficient) nodes*
 ![HiResFix](https://user-images.githubusercontent.com/112517630/230495296-1d6e9e5d-2b86-4c69-90c7-2ba797b13bf4.png)
 
