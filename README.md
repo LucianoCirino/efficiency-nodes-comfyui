@@ -13,10 +13,12 @@ Efficiency Nodes for ComfyUI
 
 ## **Examples:**
   
-* HiResFix example using the 'Efficient Loader' & 'Ksampler (Efficient) nodes'
+- HiResFix using the **Efficient Loader** & **Ksampler (Efficient)**
+
 <img src="https://user-images.githubusercontent.com/112517630/230495296-1d6e9e5d-2b86-4c69-90c7-2ba797b13bf4.png" width="720">
 
-* Image Overlay node example
+- Photobashing using the **Image Overlay** node
+
 <img src="https://user-images.githubusercontent.com/112517630/230495326-1c4482b8-f938-4bd7-8706-00c05babb8ec.png" width="720">
 
 
