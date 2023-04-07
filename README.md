@@ -15,11 +15,11 @@ Efficiency Nodes for ComfyUI
   
 - HiResFix using the **Efficient Loader** & **Ksampler (Efficient)**
 
-<img src="https://user-images.githubusercontent.com/112517630/230495296-1d6e9e5d-2b86-4c69-90c7-2ba797b13bf4.png" width="720">
+<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/HiResFix.png" width="720">
 
 - Photobashing using the **Image Overlay** node
 
-<img src="https://user-images.githubusercontent.com/112517630/230495326-1c4482b8-f938-4bd7-8706-00c05babb8ec.png" width="720">
+<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/ImgOverlay.png" width="720">
 
 
 ## **Install:**
