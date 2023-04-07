@@ -20,7 +20,6 @@ import importlib
 import matplotlib.pyplot as plt
 import random
 
-global my_dir, comfy_dir
 
 # Get the absolute path of the parent directory of the current script
 my_dir = os.path.dirname(os.path.abspath(__file__))
@@ -37,6 +36,8 @@ import comfy.samplers
 import comfy.sd
 import comfy.utils
 
+MAX_RESOLUTION=8192
+
 # Tensor to PIL (grabbed from WAS Suite)
 def tensor2pil(image: torch.Tensor) -> Image.Image:
     return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
@@ -51,30 +52,40 @@ class TSC_EfficientLoader:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
-                              "vae_name": (folder_paths.get_filename_list("vae"),), #.insert(0, "default.pt")
+                              "vae_name": (folder_paths.get_filename_list("vae"),),
                               "clip_skip": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
-                              "positive": ("STRING", {"default": "Positive prompt goes here.","multiline": True}),
-                              "negative": ("STRING", {"default": "Negative prompt goes here.", "multiline": True}),
+                              "positive": ("STRING", {"default": "Positive","multiline": True}),
+                              "negative": ("STRING", {"default": "Negative", "multiline": True}),
+                              "empty_latent_width": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 64}),
+                              "empty_latent_height": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 64}),
+                              "batch_size": ("INT", {"default": 1, "min": 1, "max": 64})
                              }}
 
-    RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "CLIP", "VAE", )
-    RETURN_NAMES = ("MODEL", "CONDITIONING+", "CONDITIONING-", "CLIP", "VAE",  )
+    RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "LATENT", "VAE", "CLIP" ,)
+    RETURN_NAMES = ("MODEL", "CONDITIONING+", "CONDITIONING-", "LATENT", "VAE", "CLIP", )
     FUNCTION = "efficientloader"
 
     CATEGORY = "Efficiency Nodes/Loaders"
 
-    def efficientloader(self, ckpt_name, vae_name, clip_skip, positive, negative, output_vae=True, output_clip=True):
+    def efficientloader(self, ckpt_name, vae_name, clip_skip, positive, negative, empty_latent_width, empty_latent_height, batch_size,
+                        output_vae=True, output_clip=True):
+        # Load Checkpoint
         ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
         out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"))
 
+        # Create Empty Latent
+        latent = torch.zeros([batch_size, 4, empty_latent_height // 8, empty_latent_width // 8]).cpu()
+
+        # Load VAE
         vae_path = folder_paths.get_full_path("vae", vae_name)
         vae = comfy.sd.VAE(ckpt_path=vae_path)
 
+        # Extract CLIP
         clip = out[1] #second entry
         clip = clip.clone()
         clip.clip_layer(clip_skip)
 
-        return (out[0], [[clip.encode(positive), {}]], [[clip.encode(negative), {}]], out[1],  vae, )
+        return (out[0], [[clip.encode(positive), {}]], [[clip.encode(negative), {}]], {"samples":latent}, vae, out[1], )
 
 
 # TSC KSampler (Efficient)
@@ -141,7 +152,7 @@ class TSC_KSampler:
             print('\033[38;2;62;116;77mTSC_Nodes:\033[0m TSC_KSampler({}): no vae input detected, preview disabled'.format(my_unique_id))
             return {"ui": {"images": list()}, "result": (model, positive, negative, {"samples": latent}, vae, empty_image, )}
 
-        images = vae.decode(latent)
+        images = vae.decode(latent).cpu()
         last_helds["images"][my_unique_id] = images
 
         filename_prefix = "TSC_KS_{:02d}".format(my_unique_id)
@@ -216,8 +227,8 @@ class TSC_ImageOverlay:
                 "overlay_resize": (["None", "Fit", "Resize by rescale_factor", "Resize to width & heigth"],),
                 "resize_method": (["nearest-exact", "bilinear", "area"],),
                 "rescale_factor": ("FLOAT", {"default": 1, "min": 0.01, "max": 16.0, "step": 0.01}),
-                "width": ("INT", {"default": 512, "min": 0, "max": 7680, "step": 64}),
-                "height": ("INT", {"default": 512, "min": 0, "max": 4320, "step": 64}),
+                "width": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 64}),
+                "height": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 64}),
                 "x_offset": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 1}),
                 "y_offset": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 1}),
                 "rotation": ("INT", {"default": 0, "min": -180, "max": 180, "step": 1}),
