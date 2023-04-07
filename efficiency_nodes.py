@@ -1,4 +1,4 @@
-# Efficiency Nodes - A collection of some of my ComfyUI custom nodes
+# Efficiency Nodes - A collection of my ComfyUI custom nodes to help streamline workflows and reduce total node count.
 #  by Luciano Cirino (Discord: TSC#9184) - April 2023
 
 from PIL import Image, ImageFilter, ImageEnhance, ImageOps, ImageDraw, ImageChops, ImageFont
@@ -17,9 +17,7 @@ import folder_paths
 
 import model_management
 import importlib
-#import matplotlib.pyplot as plt
 import random
-
 
 # Get the absolute path of the parent directory of the current script
 my_dir = os.path.dirname(os.path.abspath(__file__))
@@ -48,11 +46,19 @@ def pil2tensor(image: Image.Image) -> torch.Tensor:
 
 
 # TSC Efficient Loader
+# Track what objects have already been loaded into memory (*only for instances of this node)
+loaded_objects = {
+    "ckpt": [], # (ckpt_name, location)
+    "clip": [], # (ckpt_name, location)
+    "bvae": [], # (ckpt_name, location)
+    "vae": []   # (vae_name, location)
+}
 class TSC_EfficientLoader:
+
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
-                              "vae_name": (folder_paths.get_filename_list("vae"),),
+                              "vae_name": (["Baked VAE"] + folder_paths.get_filename_list("vae"),),
                               "clip_skip": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
                               "positive": ("STRING", {"default": "Positive","multiline": True}),
                               "negative": ("STRING", {"default": "Negative", "multiline": True}),
@@ -68,24 +74,57 @@ class TSC_EfficientLoader:
     CATEGORY = "Efficiency Nodes/Loaders"
 
     def efficientloader(self, ckpt_name, vae_name, clip_skip, positive, negative, empty_latent_width, empty_latent_height, batch_size,
-                        output_vae=True, output_clip=True):
-        # Load Checkpoint
-        ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
-        out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"))
+                        output_vae=False, output_clip=True):
+
+        # Baked VAE setup
+        if vae_name == "Baked VAE":
+            output_vae = True
+
+        # Search for tuple index that contains ckpt_name in "ckpt" array of loaded_lbjects
+        checkpoint_found = False
+        for i, entry in enumerate(loaded_objects["ckpt"]):
+            if entry[0] == ckpt_name:
+                # Extract the second element of the tuple at 'i' in the "ckpt", "clip", "bvae" arrays
+                model = loaded_objects["ckpt"][i][1]
+                clip = loaded_objects["clip"][i][1]
+                vae = loaded_objects["bvae"][i][1]
+                checkpoint_found = True
+                break
+
+        # If not found, load ckpt
+        if checkpoint_found == False:
+            # Load Checkpoint
+            ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
+            out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"))
+            model = out[0]
+            clip = out[1]
+            vae = out[2]
+
+            # Update loaded_objects[] array
+            loaded_objects["ckpt"].append((ckpt_name, out[0]))
+            loaded_objects["clip"].append((ckpt_name, out[1]))
+            loaded_objects["bvae"].append((ckpt_name, out[2]))
 
         # Create Empty Latent
         latent = torch.zeros([batch_size, 4, empty_latent_height // 8, empty_latent_width // 8]).cpu()
 
-        # Load VAE
-        vae_path = folder_paths.get_full_path("vae", vae_name)
-        vae = comfy.sd.VAE(ckpt_path=vae_path)
+        # Check for custom VAE
+        if vae_name != "Baked VAE":
+            # Check if vae_name exists in "vae" array
+            if any(entry[0] == vae_name for entry in loaded_objects["vae"]):
+                # Extract the second tuple entry of the checkpoint
+                vae = [entry[1] for entry in loaded_objects["vae"] if entry[0] == vae_name][0]
+            else:
+                vae_path = folder_paths.get_full_path("vae", vae_name)
+                vae = comfy.sd.VAE(ckpt_path=vae_path)
+                # Update loaded_objects[] array
+                loaded_objects["vae"].append((vae_name, vae))
 
-        # Extract CLIP
-        clip = out[1] #second entry
+        # CLIP skip
         clip = clip.clone()
         clip.clip_layer(clip_skip)
 
-        return (out[0], [[clip.encode(positive), {}]], [[clip.encode(negative), {}]], {"samples":latent}, vae, out[1], )
+        return (model, [[clip.encode(positive), {}]], [[clip.encode(negative), {}]], {"samples":latent}, vae, clip, )
 
 
 # TSC KSampler (Efficient)
@@ -115,6 +154,7 @@ class TSC_KSampler:
                      "negative": ("CONDITIONING",),
                      "latent_image": ("LATENT",),
                      "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                     "preview_image": (["Disabled", "Enabled"],),
                      },
                 "optional": { "optional_vae": ("VAE",), },
                 "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
@@ -126,7 +166,8 @@ class TSC_KSampler:
     OUTPUT_NODE = True
     CATEGORY = "Efficiency Nodes/Sampling"
 
-    def sample(self, sampler_state, my_unique_id, model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0, prompt=None, extra_pnginfo=None, optional_vae=(None,)):
+    def sample(self, sampler_state, my_unique_id, model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
+               latent_image, preview_image, denoise=1.0, prompt=None, extra_pnginfo=None, optional_vae=(None,)):
 
         global last_helds
         last_results = last_helds["results"][my_unique_id]
@@ -147,7 +188,7 @@ class TSC_KSampler:
         latent = samples[0]["samples"]
         last_helds["latent"][my_unique_id] =  latent
 
-        if vae == (None,):
+        if vae == (None,) or preview_image == "Disabled":
             last_results = None
             print('\033[38;2;62;116;77mTSC_Nodes:\033[0m TSC_KSampler({}): no vae input detected, preview disabled'.format(my_unique_id))
             return {"ui": {"images": list()}, "result": (model, positive, negative, {"samples": latent}, vae, empty_image, )}
@@ -216,7 +257,6 @@ class TSC_KSampler:
 
 # TSC Image Overlay
 class TSC_ImageOverlay:
-    #upscale_methods = ["nearest-exact", "bilinear", "area"]
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -253,12 +293,10 @@ class TSC_ImageOverlay:
             #Extract overlay size and store in Tuple "overlay_size" (WxH)
             overlay_size = overlay.size()
             overlay_size = (overlay_size[2], overlay_size[1])
-            #print(overlay_size)
             if size_option == "Fit":
                 overlay_size = (base.size[0],base.size[1])
             elif size_option == "Resize by rescale_factor":
                 overlay_size = tuple(int(dimension * rescale_factor) for dimension in overlay_size)
-                #overlay_size = (int(overlay.size()[0] * rescale_factor), int(overlay.size()[1] * rescale_factor))
             elif size_option == "Resize to width & heigth":
                 overlay_size = (size[0], size[1])
 
@@ -269,6 +307,7 @@ class TSC_ImageOverlay:
         overlay = tensor2pil(overlay)
 
          # Add Alpha channel to overlay
+        overlay = overlay.convert('RGBA')
         overlay.putalpha(Image.new("L", overlay.size, 255))
 
         # If mask connected, check if the overlay image has an alpha channel
@@ -276,21 +315,16 @@ class TSC_ImageOverlay:
             # Convert mask to pil and resize
             mask = tensor2pil(mask)
             mask = mask.resize(overlay.size)
-
-            #Test
-            #samples = mask.movedim(-1, 1)
-            #mask = comfy.utils.common_upscale(samples, overlay_size[0], overlay_size[1], resize_method, False)
-            #mask = mask.movedim(1, -1)
-            #mask = tensor2pil(mask)
-
             # Apply mask as overlay's alpha
             overlay.putalpha(ImageOps.invert(mask))
 
         # Rotate the overlay image
-        overlay = overlay.rotate(rotation, expand=False)
+        overlay = overlay.rotate(rotation, expand=True)
 
         # Apply opacity on overlay image
-        overlay = overlay.point(lambda x: int(x * (1 - opacity / 100)))
+        r, g, b, a = overlay.split()
+        a = a.point(lambda x: max(0, int(x * (1 - opacity / 100))))
+        overlay.putalpha(a)
 
         # Paste the overlay image onto the base image
         if mask is None:
@@ -327,6 +361,7 @@ class TSC_EvaluateInts:
             print(f"\033[90m{{a = {a} , b = {b} , c = {c}}} \033[0m")
             print(f"{python_expression} = \033[92m INT: " + str(int_result) + " , FLOAT: " + str(float_result) + "\033[0m")
         return (int_result, float_result,)
+
 
 # TSC Evaluate Strings
 class TSC_EvaluateStrs:
