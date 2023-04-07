@@ -25,7 +25,7 @@ import random
 my_dir = os.path.dirname(os.path.abspath(__file__))
 
 # Construct the absolute path to the ComfyUI directory
-comfy_dir = os.path.join(my_dir, '..', '..')
+comfy_dir = os.path.abspath(os.path.join(my_dir, '..', '..'))
 
 # Add the ComfyUI directory path to the sys.path list
 sys.path.append(comfy_dir)
