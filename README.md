@@ -6,7 +6,7 @@ Efficiency Nodes for ComfyUI
 ## **Currently Available Nodes:**
 <details><summary>Ksampler (Efficient)</summary><ul>
 • A modded KSampler with the ability to preview and output images.<br>
-• Re-outputs key inputs for a cleaner ComfyUI workflow look.<br>
+• Re-outputs key inputs which helps promote a cleaner and more streamlined workflow look for ComfyUI.<br>
 • Can force hold all of its outputs without regenerating by setting its state to "Hold".
 <blockquote>note: when using multiple instances of this node, each instance must have a unique ID for the "Hold" state to function properly.</blockquote>
 </ul></details>
