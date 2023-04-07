@@ -4,32 +4,28 @@ Efficiency Nodes for ComfyUI
 ## [Direct Download Link](https://github.com/LucianoCirino/efficiency-nodes-comfyui/releases/download/v1.0/efficiency-nodes-comfyui.v1.0.zip)
 
 ## **Currently Available Nodes:**
-<details><summary>Ksampler (Efficient)</summary>
+<details><summary>Ksampler (Efficient)</summary><ul>
+• A modded KSampler with the ability to preview and output images.<br>
+• Re-outputs key inputs for a cleaner ComfyUI workflow look.<br>
+• Can force hold all of its outputs without regenerating by setting its state to "Hold".
+<blockquote>note: when using multiple instances of this node, each instance must have a unique ID for the "Hold" state to function properly.</blockquote>
+</ul></details>
 
- * Modded KSampler that has the ability to preview and output images<br>
- * Re-outputs key inputs for a cleaner ComfyUI workflow look<br>
- * Can force hold all of its outputs without regenerating, including the output image
-<blockquote>note: When using multiple instances of this node, each node must have a unique id for the "Hold" function to work properly</blockquote>
-</details>
-<details><summary>Efficient Loader</summary>
+<details><summary>Efficient Loader</summary><ul>
+• A combination of common initialization nodes.
+</ul></details>
 
-* A combination of common initialization nodes
-</details>
+<details><summary>Image Overlay</summary><ul>
+• Node that allows for flexible image overlaying.
+</ul></details>
 
-<details><summary>Image Overlay</summary>
+<details><summary>Evaluate Integers</summary><ul>
+• 3 integer input node that gives the user ability to write their own python expression for a INT/FLOAT type output.
+</ul></details>
 
-* Node that allows for flexible image overlaying
-</details>
-
-<details><summary>Evaluate Integers</summary>
-
-* 3 integer input node that gives the user ability to write their own python expression for a INT/FLOAT type output.
-</details>
-
-<details><summary>Evaluate Strings</summary>
-
-* 3 string input node that gives the user ability to write their own python expression for a STRING output.
-</details>
+<details><summary>Evaluate Strings</summary><ul>
+• 3 string input node that gives the user ability to write their own python expression for a STRING type output.
+</ul></details>
 
 ## **Examples:**
   
