@@ -17,7 +17,7 @@ import folder_paths
 
 import model_management
 import importlib
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 import random
 
 
