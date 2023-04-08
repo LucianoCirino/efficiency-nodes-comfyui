@@ -129,9 +129,9 @@ class TSC_EfficientLoader:
 
 # TSC KSampler (Efficient)
 last_helds = {
-    "results": [[] for _ in range(15)],
-    "latent": [[] for _ in range(15)],
-    "images": [[] for _ in range(15)]
+    "results": [None for _ in range(15)],
+    "latent": [None for _ in range(15)],
+    "images": [None for _ in range(15)]
 }
 class TSC_KSampler:
 
@@ -169,29 +169,51 @@ class TSC_KSampler:
     def sample(self, sampler_state, my_unique_id, model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
                latent_image, preview_image, denoise=1.0, prompt=None, extra_pnginfo=None, optional_vae=(None,)):
 
-        global last_helds
-        last_results = last_helds["results"][my_unique_id]
-        last_latent = last_helds["latent"][my_unique_id]
-        last_images = last_helds["images"][my_unique_id]
-
-        vae = optional_vae
         empty_image = pil2tensor(Image.new('RGBA', (1, 1), (0, 0, 0, 0)))
+        vae = optional_vae
+
+        # Preview check
+        preview = True
+        if vae == (None,) or preview_image == "Disabled":
+            preview = False
+            last_helds["results"][my_unique_id]  = None
+            last_helds["images"][my_unique_id] = None
+            if vae == (None,):
+                print('\033[32mKSampler(Efficient)[{}]:\033[0m No vae input detected, preview image disabled'.format(my_unique_id))
+
+        # Init last_results
+        if last_helds["results"][my_unique_id] == None:
+            last_results = list()
+        else:
+            last_results = last_helds["results"][my_unique_id]
+
+        # Init last_latent
+        if last_helds["latent"][my_unique_id] == None:
+            last_latent = latent_image
+        else:
+            last_latent = {"samples": None}
+            last_latent["samples"] = last_helds["latent"][my_unique_id]
+
+        # Init last_images
+        if last_helds["images"][my_unique_id] == None:
+            last_images = empty_image
+        else:
+            last_images = last_helds["images"][my_unique_id]
+
+        if sampler_state == "Sample":
+            samples = common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
+            latent = samples[0]["samples"]
+            last_helds["latent"][my_unique_id] =  latent
+            if preview == False:
+                return {"ui": {"images": list()}, "result": (model, positive, negative, {"samples": latent}, vae, empty_image,)}
 
         # Adjust for KSampler states
-        if sampler_state == "Hold":
-            if last_results is not None or last_latent is not None:
-                return {"ui": {"images": last_results}, "result": (model, positive, negative, {"samples": last_latent}, vae, last_images, )}
+        elif sampler_state == "Hold":
+            print('\033[32mKSampler(Efficient)[{}] outputs on hold\033[0m'.format(my_unique_id))
+            if preview == False:
+                return {"ui": {"images": last_results}, "result": (model, positive, negative, last_latent, vae, last_images,)}
             else:
-                return (model, positive, negative, latent_image, vae, empty_image, )
-
-        samples = common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
-        latent = samples[0]["samples"]
-        last_helds["latent"][my_unique_id] =  latent
-
-        if vae == (None,) or preview_image == "Disabled":
-            last_results = None
-            print('\033[38;2;62;116;77mTSC_Nodes:\033[0m TSC_KSampler({}): no vae input detected, preview disabled'.format(my_unique_id))
-            return {"ui": {"images": list()}, "result": (model, positive, negative, {"samples": latent}, vae, empty_image, )}
+                latent = last_latent["samples"]
 
         images = vae.decode(latent).cpu()
         last_helds["images"][my_unique_id] = images
@@ -251,8 +273,11 @@ class TSC_KSampler:
             counter += 1
         last_helds["results"][my_unique_id] = results
 
+        #if sampler_state == "Sample":
         # Output results to ui and node outputs
         return {"ui": {"images": results}, "result": (model, positive, negative, {"samples":latent}, vae, images, )}
+        #if sampler_state == "Hold":
+        #    return {"ui": {"images": last_results}, "result": (model, positive, negative, last_latent, vae, last_images,)}
 
 
 # TSC Image Overlay
@@ -266,13 +291,13 @@ class TSC_ImageOverlay:
                 "overlay_image": ("IMAGE",),
                 "overlay_resize": (["None", "Fit", "Resize by rescale_factor", "Resize to width & heigth"],),
                 "resize_method": (["nearest-exact", "bilinear", "area"],),
-                "rescale_factor": ("FLOAT", {"default": 1, "min": 0.01, "max": 16.0, "step": 0.01}),
+                "rescale_factor": ("FLOAT", {"default": 1, "min": 0.01, "max": 16.0, "step": 0.1}),
                 "width": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 64}),
                 "height": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 64}),
-                "x_offset": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 1}),
-                "y_offset": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 1}),
-                "rotation": ("INT", {"default": 0, "min": -180, "max": 180, "step": 1}),
-                "opacity": ("FLOAT", {"default": 0, "min": 0, "max": 100, "step": .5}),
+                "x_offset": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 10}),
+                "y_offset": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 10}),
+                "rotation": ("INT", {"default": 0, "min": -180, "max": 180, "step": 5}),
+                "opacity": ("FLOAT", {"default": 0, "min": 0, "max": 100, "step": 5}),
             },
             "optional": {"optional_mask": ("MASK",),}
         }
