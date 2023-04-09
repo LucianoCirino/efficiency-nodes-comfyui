@@ -50,7 +50,7 @@ loaded_objects = {
 class TSC_EfficientLoader:
 
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {"required": { "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
                               "vae_name": (["Baked VAE"] + folder_paths.get_filename_list("vae"),),
                               "clip_skip": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
@@ -134,7 +134,7 @@ class TSC_KSampler:
         self.type = "temp"
 
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {"required":
                     {"sampler_state": (["Sample", "Hold"], ),
                      "my_unique_id": ("INT", {"default": 0, "min": 0, "max": 15}),
@@ -358,7 +358,7 @@ class TSC_ImageOverlay:
 # TSC Evaluate Integers
 class TSC_EvaluateInts:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {"required": {
                     "python_expression": ("STRING", {"default": "((a + b) - c) / 2", "multiline": False}),
                     "print_to_console": (["False", "True"],),},
@@ -385,7 +385,7 @@ class TSC_EvaluateInts:
 # TSC Evaluate Strings
 class TSC_EvaluateStrs:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {"required": {
                     "python_expression": ("STRING", {"default": "a + b + c", "multiline": False}),
                     "print_to_console": (["False", "True"],)},
