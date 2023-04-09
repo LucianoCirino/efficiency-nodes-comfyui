@@ -1,7 +1,8 @@
 # Efficiency Nodes - A collection of my ComfyUI custom nodes to help streamline workflows and reduce total node count.
 #  by Luciano Cirino (Discord: TSC#9184) - April 2023
 
-from PIL import Image, ImageFilter, ImageEnhance, ImageOps, ImageDraw, ImageChops, ImageFont
+from nodes import common_ksampler
+from PIL import Image, ImageOps
 from PIL.PngImagePlugin import PngInfo
 import numpy as np
 import torch
@@ -9,15 +10,9 @@ import torch
 import os
 import sys
 import json
-import hashlib
-import copy
-import traceback
 import copy
 import folder_paths
 
-import model_management
-import importlib
-import random
 
 # Get the absolute path of the parent directory of the current script
 my_dir = os.path.dirname(os.path.abspath(__file__))
@@ -29,7 +24,6 @@ comfy_dir = os.path.abspath(os.path.join(my_dir, '..', '..'))
 sys.path.append(comfy_dir)
 
 # Import functions from nodes.py in the ComfyUI directory
-from nodes import common_ksampler, before_node_execution, interrupt_processing
 import comfy.samplers
 import comfy.sd
 import comfy.utils
