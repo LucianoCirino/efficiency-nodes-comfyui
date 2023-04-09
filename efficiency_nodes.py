@@ -2,6 +2,7 @@
 #  by Luciano Cirino (Discord: TSC#9184) - April 2023
 
 from nodes import common_ksampler
+from torch import Tensor
 from PIL import Image, ImageOps
 from PIL.PngImagePlugin import PngInfo
 import numpy as np
@@ -10,9 +11,7 @@ import torch
 import os
 import sys
 import json
-import copy
 import folder_paths
-
 
 # Get the absolute path of the parent directory of the current script
 my_dir = os.path.dirname(os.path.abspath(__file__))
@@ -74,6 +73,10 @@ class TSC_EfficientLoader:
         if vae_name == "Baked VAE":
             output_vae = True
 
+        model: ModelPatcher | None = None
+        clip: CLIP | None = None
+        vae: VAE | None = None
+
         # Search for tuple index that contains ckpt_name in "ckpt" array of loaded_lbjects
         checkpoint_found = False
         for i, entry in enumerate(loaded_objects["ckpt"]):
@@ -115,6 +118,8 @@ class TSC_EfficientLoader:
                 loaded_objects["vae"].append((vae_name, vae))
 
         # CLIP skip
+        if not clip:
+            raise Exception("No CLIP found")
         clip = clip.clone()
         clip.clip_layer(clip_skip)
 
@@ -122,7 +127,7 @@ class TSC_EfficientLoader:
 
 
 # TSC KSampler (Efficient)
-last_helds = {
+last_helds: dict[str, list] = {
     "results": [None for _ in range(15)],
     "latent": [None for _ in range(15)],
     "images": [None for _ in range(15)]
@@ -193,6 +198,8 @@ class TSC_KSampler:
             last_images = empty_image
         else:
             last_images = last_helds["images"][my_unique_id]
+            
+        latent: Tensor|None = None
 
         if sampler_state == "Sample":
             samples = common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
