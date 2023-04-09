@@ -1,6 +1,7 @@
 # Efficiency Nodes - A collection of my ComfyUI custom nodes to help streamline workflows and reduce total node count.
 #  by Luciano Cirino (Discord: TSC#9184) - April 2023
 
+from comfy.sd import ModelPatcher, CLIP, VAE
 from nodes import common_ksampler
 from torch import Tensor
 from PIL import Image, ImageOps
