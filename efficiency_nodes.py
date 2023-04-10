@@ -1,7 +1,10 @@
 # Efficiency Nodes - A collection of my ComfyUI custom nodes to help streamline workflows and reduce total node count.
 #  by Luciano Cirino (Discord: TSC#9184) - April 2023
 
-from PIL import Image, ImageFilter, ImageEnhance, ImageOps, ImageDraw, ImageChops, ImageFont
+from comfy.sd import ModelPatcher, CLIP, VAE
+from nodes import common_ksampler
+from torch import Tensor
+from PIL import Image, ImageOps
 from PIL.PngImagePlugin import PngInfo
 import numpy as np
 import torch
@@ -9,15 +12,7 @@ import torch
 import os
 import sys
 import json
-import hashlib
-import copy
-import traceback
-import copy
 import folder_paths
-
-import model_management
-import importlib
-import random
 
 # Get the absolute path of the parent directory of the current script
 my_dir = os.path.dirname(os.path.abspath(__file__))
@@ -29,7 +24,6 @@ comfy_dir = os.path.abspath(os.path.join(my_dir, '..', '..'))
 sys.path.append(comfy_dir)
 
 # Import functions from nodes.py in the ComfyUI directory
-from nodes import common_ksampler, before_node_execution, interrupt_processing
 import comfy.samplers
 import comfy.sd
 import comfy.utils
@@ -56,7 +50,7 @@ loaded_objects = {
 class TSC_EfficientLoader:
 
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {"required": { "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
                               "vae_name": (["Baked VAE"] + folder_paths.get_filename_list("vae"),),
                               "clip_skip": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
@@ -79,6 +73,10 @@ class TSC_EfficientLoader:
         # Baked VAE setup
         if vae_name == "Baked VAE":
             output_vae = True
+
+        model: ModelPatcher | None = None
+        clip: CLIP | None = None
+        vae: VAE | None = None
 
         # Search for tuple index that contains ckpt_name in "ckpt" array of loaded_lbjects
         checkpoint_found = False
@@ -121,6 +119,8 @@ class TSC_EfficientLoader:
                 loaded_objects["vae"].append((vae_name, vae))
 
         # CLIP skip
+        if not clip:
+            raise Exception("No CLIP found")
         clip = clip.clone()
         clip.clip_layer(clip_skip)
 
@@ -128,7 +128,7 @@ class TSC_EfficientLoader:
 
 
 # TSC KSampler (Efficient)
-last_helds = {
+last_helds: dict[str, list] = {
     "results": [None for _ in range(15)],
     "latent": [None for _ in range(15)],
     "images": [None for _ in range(15)]
@@ -140,7 +140,7 @@ class TSC_KSampler:
         self.type = "temp"
 
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {"required":
                     {"sampler_state": (["Sample", "Hold"], ),
                      "my_unique_id": ("INT", {"default": 0, "min": 0, "max": 15}),
@@ -199,6 +199,8 @@ class TSC_KSampler:
             last_images = empty_image
         else:
             last_images = last_helds["images"][my_unique_id]
+            
+        latent: Tensor|None = None
 
         if sampler_state == "Sample":
             samples = common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
@@ -364,7 +366,7 @@ class TSC_ImageOverlay:
 # TSC Evaluate Integers
 class TSC_EvaluateInts:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {"required": {
                     "python_expression": ("STRING", {"default": "((a + b) - c) / 2", "multiline": False}),
                     "print_to_console": (["False", "True"],),},
@@ -391,7 +393,7 @@ class TSC_EvaluateInts:
 # TSC Evaluate Strings
 class TSC_EvaluateStrs:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {"required": {
                     "python_expression": ("STRING", {"default": "a + b + c", "multiline": False}),
                     "print_to_console": (["False", "True"],)},
