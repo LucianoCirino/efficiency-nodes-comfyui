@@ -7,8 +7,8 @@ Efficiency Nodes for ComfyUI
 <details><summary>Ksampler (Efficient)</summary><ul>
 • A modded KSampler with the ability to preview and output images.<br>
 • Re-outputs key inputs which helps promote a cleaner and more streamlined workflow look for ComfyUI.<br>
-• Can force hold all of its outputs without regenerating by setting its state to "Hold".
-• Simplifies the comparison of settings by generating clear and concise image plots.
+• Can force hold all of its outputs without regenerating by setting its state to "Hold".<br>
+• Has the capability to generate 2D plots that allow for easy comparison of different parameter settings.
 <blockquote>note: when using multiple instances of this node, each instance must have a unique ID for the "Hold" state to function properly.</blockquote>
 </ul></details>
 
