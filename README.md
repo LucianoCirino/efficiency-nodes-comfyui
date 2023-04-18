@@ -43,7 +43,7 @@ Efficiency Nodes for ComfyUI
 <img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/ImgOverlay.png" width="720">
 
 - XY Plotting using the **XY Plot** & **Ksampler (Efficient)** nodes 
-<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/Samplers%20vs%20Steps.png" width="720">
+<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/Seeds%20vs%20Samplers.png" width="720">
 
 ## **Install:**
 To install, drop the "_**efficiency-nodes-comfyui**_" folder into the "_**...\ComfyUI\ComfyUI\custom_nodes**_" directory and restart UI.
