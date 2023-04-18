@@ -17,7 +17,7 @@ Efficiency Nodes for ComfyUI
 </ul></details>
 
 <details><summary>XY Plot</summary><ul>
-• A node that allows the user to define parameters for the KSampler (Efficient) to plot on a grid.
+• A node that allows users to specify parameters for the KSampler (Efficient) to plot on a grid.
 </ul></details>
 
 <details><summary>Image Overlay</summary><ul>
