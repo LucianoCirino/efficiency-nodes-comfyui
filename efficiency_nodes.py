@@ -40,7 +40,7 @@ def pil2tensor(image: Image.Image) -> torch.Tensor:
 
 
 # TSC Efficient Loader
-# Track what objects have already been loaded into memory (*only for instances of this node)
+# Track what objects have already been loaded into memory
 loaded_objects = {
     "ckpt": [], # (ckpt_name, location)
     "clip": [], # (ckpt_name, location)
@@ -183,7 +183,7 @@ class TSC_KSampler:
                      "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                      "preview_image": (["Disabled", "Enabled"],),
                      },
-                "optional": { "optional_vae": ("VAE",), #change to vae
+                "optional": { "optional_vae": ("VAE",),
                               "script": ("SCRIPT",),},
                 "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
                 }
@@ -301,7 +301,7 @@ class TSC_KSampler:
                 # Enable vae decode on next Hold
                 last_helds["vae_decode"][my_unique_id] = True
                 return {"ui": {"images": list()},
-                        "result": (model, positive, negative, {"samples": latent}, vae, TSC_KSampler.empty_image,)}
+                        "result": (model, positive, negative, {"samples": latent}, vae, last_images,)}
             else:
                 # Decode images and store
                 images = vae.decode(latent).cpu()
@@ -326,7 +326,7 @@ class TSC_KSampler:
             # If not in preview mode, return the results in the specified format
             if preview_image == "Disabled":
                 return {"ui": {"images": list()},
-                        "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
+                        "result": (model, positive, negative, last_latent, vae, last_images,)}
 
             # if preview_image == "Enabled":
             else:
@@ -354,11 +354,6 @@ class TSC_KSampler:
                         "result": (model, positive, negative, {"samples": latent}, vae, images,)}
 
         elif sampler_state == "Script":
-            # If not in preview mode, return the results in the specified format
-            if preview_image == "Disabled":
-                print('\033[31mKSampler(Efficient)[{}] Error:\033[0m Preview must be enabled to use Script mode.'.format(my_unique_id))
-                return {"ui": {"images": list()},
-                        "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
 
             # If no script input connected, set X_type and Y_type to "Nothing"
             if script is None:
@@ -369,9 +364,9 @@ class TSC_KSampler:
                 X_type, X_value, Y_type, Y_value, grid_spacing, latent_id = script
 
             if (X_type == "Nothing" and Y_type == "Nothing"):
-                print('\033[31mKSampler(Efficient)[{}] Error:\033[0m No valid script input detected'.format(my_unique_id))
+                print('\033[31mKSampler(Efficient)[{}] Error:\033[0m No valid script entry detected'.format(my_unique_id))
                 return {"ui": {"images": list()},
-                        "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
+                        "result": (model, positive, negative, last_latent, vae, last_images,)}
 
             # Extract the 'samples' tensor from the dictionary
             latent_image_tensor = latent_image['samples']
@@ -706,8 +701,12 @@ class TSC_KSampler:
             results = preview_images(images, filename_prefix)
             last_helds["results"][my_unique_id] = results
 
-            # Output image results to ui and node outputs
-            return {"ui": {"images": results}, "result": (model, positive, negative, {"samples": latent_new}, vae, images,)}
+            # If not in preview mode, return the results in the specified format
+            if preview_image == "Disabled":
+                return {"ui": {"images": list()}, "result": (model, positive, negative, last_latent, vae, images,)}
+            else:
+                # Output image results to ui and node outputs
+                return {"ui": {"images": results}, "result": (model, positive, negative, {"samples": latent_new}, vae, images,)}
 
 
 # TSC XY Plot
