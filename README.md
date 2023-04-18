@@ -43,7 +43,7 @@ Efficiency Nodes for ComfyUI
 <img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/ImgOverlay.png" width="720">
 
 - XY Plotting using the **XY Plot** & **Ksampler (Efficient)** nodes 
-<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/HiResFix%20Steps_vs_LatentBatch.png" width="720">
+<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/Denoise%20View.png" width="720">
 
 ## **Install:**
 To install, drop the "_**efficiency-nodes-comfyui**_" folder into the "_**...\ComfyUI\ComfyUI\custom_nodes**_" directory and restart UI.
