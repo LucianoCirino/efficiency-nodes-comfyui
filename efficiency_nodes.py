@@ -256,6 +256,7 @@ class TSC_KSampler:
         vae = optional_vae
         if vae == (None,):
             print('\033[32mKSampler(Efficient)[{}] Warning:\033[0m No vae input detected, preview image disabled'.format(my_unique_id))
+            preview_image = "Disabled"
 
         # Init last_results
         if last_helds["results"][my_unique_id] == None:
