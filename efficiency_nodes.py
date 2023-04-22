@@ -622,7 +622,7 @@ class TSC_KSampler:
                     if len(var) == 2:
                         text = f"{sampler_name} ({var[0]})"
                     else:
-                        text = f"{var[0]}"
+                        text = f"{var}"
                     text = text.replace("ancestral", "a").replace("uniform", "u")
                 # If var_type is "Denoise", update denoise and generate labels
                 elif var_type == "Denoise":
