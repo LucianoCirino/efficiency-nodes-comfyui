@@ -576,6 +576,22 @@ class TSC_KSampler:
             if Y_type == "Latent Batch":
                 Y_value = latent_list
 
+            # Embedd information into "Scheduler" X/Y_values for text label
+            if X_type == "Scheduler" and Y_type != "Sampler":
+                # X_value second list value of each array entry = None
+                for i in range(len(X_value)):
+                    if len(X_value[i]) == 2:
+                        X_value[i][1] = None
+                    else:
+                        X_value[i] = [X_value[i], None]
+            if Y_type == "Scheduler" and X_type != "Sampler":
+                # Y_value second list value of each array entry = None
+                for i in range(len(Y_value)):
+                    if len(Y_value[i]) == 2:
+                        Y_value[i][1] = None
+                    else:
+                        Y_value[i] = [Y_value[i], None]
+
             def define_variable(var_type, var, seed, steps, cfg,sampler_name, scheduler, latent_image, denoise,
                                 vae_name, var_label, num_label):
 
@@ -608,8 +624,11 @@ class TSC_KSampler:
                     text = text.replace("ancestral", "a").replace("uniform", "u")
                 # If var_type is "Scheduler", update scheduler and generate labels
                 elif var_type == "Scheduler":
-                    scheduler[0] = var
-                    text = f"{scheduler[0]}"
+                    scheduler[0] = var[0]
+                    if len(var) == 2:
+                        text = f"{sampler_name} ({var[0]})"
+                    else:
+                        text = f"{var[0]}"
                 # If var_type is "Denoise", update denoise and generate labels
                 elif var_type == "Denoise":
                     denoise = var
