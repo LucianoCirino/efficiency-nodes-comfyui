@@ -629,6 +629,7 @@ class TSC_KSampler:
                         text = f"{sampler_name} ({var[0]})"
                     else:
                         text = f"{var[0]}"
+                    text = text.replace("ancestral", "a").replace("uniform", "u")
                 # If var_type is "Denoise", update denoise and generate labels
                 elif var_type == "Denoise":
                     denoise = var
@@ -903,6 +904,9 @@ class TSC_KSampler:
             # Generate image results and store
             results = preview_images(images, filename_prefix)
             update_value_by_id("results", my_unique_id, results)
+
+            # Clean loaded_objects
+            update_loaded_objects(prompt)
 
             # Output image results to ui and node outputs
             return {"ui": {"images": results}, "result": (model, positive, negative, {"samples": latent_new}, vae, images,)}
