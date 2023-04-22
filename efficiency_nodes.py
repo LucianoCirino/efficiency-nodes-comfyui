@@ -339,12 +339,6 @@ class TSC_KSampler:
     OUTPUT_NODE = True
     FUNCTION = "sample"
     CATEGORY = "Efficiency Nodes/Sampling"
-
-    def execute(self, sampler_state, model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
-                denoise, preview_image, optional_vae=None, script=None):
-        # TODO: Implement the logic to sample from the model using the given input parameters
-        # Return the outputs as a tuple with the same order and types as defined in RETURN_TYPES and RETURN_NAMES
-        return model, positive, negative, latent_image, optional_vae, self.empty_image
     
     def sample(self, sampler_state, model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
                latent_image, preview_image, denoise=1.0, prompt=None, extra_pnginfo=None, optional_vae=(None,), script=None):
