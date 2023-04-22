@@ -9,6 +9,7 @@ from PIL.PngImagePlugin import PngInfo
 import numpy as np
 import torch
 
+from pathlib import Path
 import os
 import sys
 import json
@@ -22,6 +23,9 @@ comfy_dir = os.path.abspath(os.path.join(my_dir, '..', '..'))
 
 # Add the ComfyUI directory path to the sys.path list
 sys.path.append(comfy_dir)
+
+# Construct the path to the font file
+font_path = os.path.join(my_dir, 'arial.ttf')
 
 # Import functions from nodes.py in the ComfyUI directory
 import comfy.samplers
@@ -38,15 +42,67 @@ def tensor2pil(image: torch.Tensor) -> Image.Image:
 def pil2tensor(image: Image.Image) -> torch.Tensor:
     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
 
+def resolve_input_links(prompt, input_value):
+    if isinstance(input_value, list) and len(input_value) == 2:
+        input_id, input_index = input_value
+        return prompt[input_id]['inputs'][list(prompt[input_id]['inputs'].keys())[input_index]]
+    return input_value
 
-# TSC Efficient Loader
-# Track what objects have already been loaded into memory
+# Cache models in RAM
 loaded_objects = {
     "ckpt": [], # (ckpt_name, location)
     "clip": [], # (ckpt_name, location)
     "bvae": [], # (ckpt_name, location)
-    "vae": []   # (vae_name, location)
+    "vae": [],   # (vae_name, location)
+    "lora": [] # (lora_name, location)
 }
+
+def print_loaded_objects_entries():
+    print("\n" + "-" * 40)  # Print an empty line followed by a separator line
+
+    for key in ["ckpt", "clip", "bvae", "vae", "lora"]:
+        print(f"{key.capitalize()} entries:")
+        for entry in loaded_objects[key]:
+            truncated_name = entry[0][:20]
+            print(f"  Name: {truncated_name}\n  Location: {entry[1]}")
+            if len(entry) == 3:
+                print(f"  Entry[2]: {entry[2]}")
+        print("-" * 40)  # Print a separator line
+
+    print("\n")  # Print an empty line
+
+
+def update_loaded_objects(prompt):
+    global loaded_objects
+
+    # Extract all Efficient Loader class type entries
+    efficient_loader_entries = [entry for entry in prompt.values() if entry["class_type"] == "Efficient Loader"]
+
+    # Collect all desired model, vae, and lora names
+    desired_ckpt_names = set()
+    desired_vae_names = set()
+    desired_lora_names = set()
+    for entry in efficient_loader_entries:
+        desired_ckpt_names.add(entry["inputs"]["ckpt_name"])
+        desired_vae_names.add(entry["inputs"]["vae_name"])
+        desired_lora_names.add(entry["inputs"]["lora_name"])
+
+    # Check and clear unused ckpt, clip, and bvae entries
+    for list_key in ["ckpt", "clip", "bvae"]:
+        unused_indices = [i for i, entry in enumerate(loaded_objects[list_key]) if entry[0] not in desired_ckpt_names]
+        for index in sorted(unused_indices, reverse=True):
+            loaded_objects[list_key].pop(index)
+
+    # Check and clear unused vae entries
+    unused_vae_indices = [i for i, entry in enumerate(loaded_objects["vae"]) if entry[0] not in desired_vae_names]
+    for index in sorted(unused_vae_indices, reverse=True):
+        loaded_objects["vae"].pop(index)
+
+    # Check and clear unused lora entries
+    unused_lora_indices = [i for i, entry in enumerate(loaded_objects["lora"]) if entry[0] not in desired_lora_names]
+    for index in sorted(unused_lora_indices, reverse=True):
+        loaded_objects["lora"].pop(index)
+
 
 def load_checkpoint(ckpt_name,output_vae=True, output_clip=True):
     """
@@ -85,6 +141,7 @@ def load_checkpoint(ckpt_name,output_vae=True, output_clip=True):
 
     return model, clip, vae
 
+
 def load_vae(vae_name):
     """
     Extracts the vae with a given name from the "vae" array in loaded_objects.
@@ -103,6 +160,38 @@ def load_vae(vae_name):
         loaded_objects["vae"].append((vae_name, vae))
     return vae
 
+
+def load_lora(lora_name, model, clip, strength_model, strength_clip):
+    """
+    Extracts the Lora model with a given name from the "lora" array in loaded_objects.
+    If the Lora model is not found or the strength values change, creates a new Lora object with the given name and adds it to the "lora" array.
+    """
+    global loaded_objects
+
+    # Check if lora_name exists in "lora" array
+    existing_lora = [entry for entry in loaded_objects["lora"] if entry[0] == lora_name]
+
+    if existing_lora:
+        lora_name, model_lora, clip_lora, stored_strength_model, stored_strength_clip = existing_lora[0]
+
+        if strength_model == stored_strength_model and strength_clip == stored_strength_clip:
+            return model_lora, clip_lora
+
+    # If Lora model not found or strength values changed, generate new Lora models
+    lora_path = folder_paths.get_full_path("loras", lora_name)
+    model_lora, clip_lora = comfy.sd.load_lora_for_models(model, clip, lora_path, strength_model, strength_clip)
+
+    # Remove existing Lora model if it exists
+    if existing_lora:
+        loaded_objects["lora"].remove(existing_lora[0])
+
+    # Update loaded_objects[] array
+    loaded_objects["lora"].append((lora_name, model_lora, clip_lora, strength_model, strength_clip))
+
+    return model_lora, clip_lora
+
+
+# TSC Efficient Loader
 class TSC_EfficientLoader:
 
     @classmethod
@@ -110,21 +199,23 @@ class TSC_EfficientLoader:
         return {"required": { "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
                               "vae_name": (["Baked VAE"] + folder_paths.get_filename_list("vae"),),
                               "clip_skip": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
+                              "lora_name": (["None"] + folder_paths.get_filename_list("loras"),),
+                              "lora_model_strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                              "lora_clip_strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
                               "positive": ("STRING", {"default": "Positive","multiline": True}),
                               "negative": ("STRING", {"default": "Negative", "multiline": True}),
                               "empty_latent_width": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 64}),
                               "empty_latent_height": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 64}),
-                              "batch_size": ("INT", {"default": 1, "min": 1, "max": 64})
-                             }}
+                              "batch_size": ("INT", {"default": 1, "min": 1, "max": 64})},
+                "hidden": {"prompt": "PROMPT"}}
 
     RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "LATENT", "VAE", "CLIP" ,)
     RETURN_NAMES = ("MODEL", "CONDITIONING+", "CONDITIONING-", "LATENT", "VAE", "CLIP", )
     FUNCTION = "efficientloader"
-
     CATEGORY = "Efficiency Nodes/Loaders"
 
-    def efficientloader(self, ckpt_name, vae_name, clip_skip, positive, negative, empty_latent_width, empty_latent_height, batch_size,
-                        output_vae=False, output_clip=True):
+    def efficientloader(self, ckpt_name, vae_name, clip_skip, lora_name, lora_model_strength, lora_clip_strength,
+                        positive, negative, empty_latent_width, empty_latent_height, batch_size, prompt=None):
 
         model: ModelPatcher | None = None
         clip: CLIP | None = None
@@ -133,15 +224,20 @@ class TSC_EfficientLoader:
         # Create Empty Latent
         latent = torch.zeros([batch_size, 4, empty_latent_height // 8, empty_latent_width // 8]).cpu()
 
-        # Check for "Baked VAE" selected
-        if vae_name == "Baked VAE":
-            output_vae = True
+        # Clean models from loaded_objects
+        update_loaded_objects(prompt)
 
-        model, clip, vae = load_checkpoint(ckpt_name,output_vae)
+        # Load models
+        model, clip, vae = load_checkpoint(ckpt_name)
 
+        if lora_name != "None":
+            model, clip = load_lora(lora_name, model, clip, lora_model_strength, lora_clip_strength)
+        
         # Check for custom VAE
         if vae_name != "Baked VAE":
             vae = load_vae(vae_name)
+
+        #print_loaded_objects_entries()
 
         # CLIP skip
         if not clip:
@@ -151,12 +247,63 @@ class TSC_EfficientLoader:
 
         return (model, [[clip.encode(positive), {}]], [[clip.encode(negative), {}]], {"samples":latent}, vae, clip, )
 
+# KSampler Efficient ID finder
+last_returned_ids = {}
+def find_k_sampler_id(prompt, sampler_state=None, seed=None, steps=None, cfg=None,
+                      sampler_name=None, scheduler=None, denoise=None, preview_image=None):
+    global last_returned_ids
+
+    input_params = [
+        ('sampler_state', sampler_state),
+        ('seed', seed),
+        ('steps', steps),
+        ('cfg', cfg),
+        ('sampler_name', sampler_name),
+        ('scheduler', scheduler),
+        ('denoise', denoise),
+        ('preview_image', preview_image),
+    ]
+
+    matching_ids = []
+
+    for key, value in prompt.items():
+        if value.get('class_type') == 'KSampler (Efficient)':
+            inputs = value['inputs']
+            match = all(inputs[param_name] == param_value for param_name, param_value in input_params if param_value is not None)
+
+            if match:
+                matching_ids.append(key)
+
+    if matching_ids:
+        input_key = tuple(param_value for param_name, param_value in input_params)
+
+        if input_key in last_returned_ids:
+            last_id = last_returned_ids[input_key]
+            next_id = None
+            for id in matching_ids:
+                if id > last_id:
+                    if next_id is None or id < next_id:
+                        next_id = id
+
+            if next_id is None:
+                # All IDs have been used; start again from the first one
+                next_id = min(matching_ids)
+
+        else:
+            next_id = min(matching_ids)
+
+        last_returned_ids[input_key] = next_id
+        return next_id
+    else:
+        last_returned_ids.clear()
+        return None
+
 # TSC KSampler (Efficient)
 last_helds: dict[str, list] = {
-    "results": [None for _ in range(15)],
-    "latent": [None for _ in range(15)],
-    "images": [None for _ in range(15)],
-    "vae_decode": [False for _ in range(15)]
+    "results": [],
+    "latent": [],
+    "images": [],
+    "vae_decode": []
 }
 class TSC_KSampler:
     
@@ -170,7 +317,6 @@ class TSC_KSampler:
     def INPUT_TYPES(cls):
         return {"required":
                     {"sampler_state": (["Sample", "Hold", "Script"], ),
-                     "my_unique_id": ("INT", {"default": 0, "min": 0, "max": 15}),
                      "model": ("MODEL",),
                      "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                      "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
@@ -190,11 +336,17 @@ class TSC_KSampler:
 
     RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "LATENT", "VAE", "IMAGE", )
     RETURN_NAMES = ("MODEL", "CONDITIONING+", "CONDITIONING-", "LATENT", "VAE", "IMAGE", )
-    FUNCTION = "sample"
     OUTPUT_NODE = True
+    FUNCTION = "sample"
     CATEGORY = "Efficiency Nodes/Sampling"
 
-    def sample(self, sampler_state, my_unique_id, model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
+    def execute(self, sampler_state, model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
+                denoise, preview_image, optional_vae=None, script=None):
+        # TODO: Implement the logic to sample from the model using the given input parameters
+        # Return the outputs as a tuple with the same order and types as defined in RETURN_TYPES and RETURN_NAMES
+        return model, positive, negative, latent_image, optional_vae, self.empty_image
+    
+    def sample(self, sampler_state, model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
                latent_image, preview_image, denoise=1.0, prompt=None, extra_pnginfo=None, optional_vae=(None,), script=None):
 
         # Functions for previewing images in Ksampler
@@ -252,30 +404,50 @@ class TSC_KSampler:
                 counter += 1
             return results
 
+        def get_value_by_id(key: str, my_unique_id):
+            global last_helds
+            for value, id_ in last_helds[key]:
+                if id_ == my_unique_id:
+                    return value
+            return None
+
+        def update_value_by_id(key: str, my_unique_id, new_value):
+            global last_helds
+
+            for i, (value, id_) in enumerate(last_helds[key]):
+                if id_ == my_unique_id:
+                    last_helds[key][i] = (new_value, id_)
+                    return True
+
+            last_helds[key].append((new_value, my_unique_id))
+            return True
+
+        my_unique_id = int(find_k_sampler_id(prompt, sampler_state, seed, steps, cfg, sampler_name,scheduler, denoise, preview_image))
+
         # Vae input check
         vae = optional_vae
         if vae == (None,):
-            print('\033[32mKSampler(Efficient)[{}] Warning:\033[0m No vae input detected, preview image disabled'.format(my_unique_id))
+            print('\033[32mKSampler(Efficient)[{}] Warning:\033[0m No vae input detected, preview and output image disabled.\n'.format(my_unique_id))
             preview_image = "Disabled"
 
         # Init last_results
-        if last_helds["results"][my_unique_id] == None:
+        if get_value_by_id("results", my_unique_id) is None:
             last_results = list()
         else:
-            last_results = last_helds["results"][my_unique_id]
+            last_results = get_value_by_id("results", my_unique_id)
 
         # Init last_latent
-        if last_helds["latent"][my_unique_id] == None:
+        if get_value_by_id("latent", my_unique_id) is None:
             last_latent = latent_image
         else:
             last_latent = {"samples": None}
-            last_latent["samples"] = last_helds["latent"][my_unique_id]
+            last_latent["samples"] = get_value_by_id("latent", my_unique_id)
 
         # Init last_images
-        if last_helds["images"][my_unique_id] == None:
+        if get_value_by_id("images", my_unique_id) == None:
             last_images = TSC_KSampler.empty_image
         else:
-            last_images = last_helds["images"][my_unique_id]
+            last_images = get_value_by_id("images", my_unique_id)
 
         # Initialize latent
         latent: Tensor|None = None
@@ -294,25 +466,25 @@ class TSC_KSampler:
             latent = samples[0]["samples"]
 
             # Store the latent samples in the 'last_helds' dictionary with a unique ID
-            last_helds["latent"][my_unique_id] = latent
+            update_value_by_id("latent", my_unique_id, latent)
 
             # If not in preview mode, return the results in the specified format
             if preview_image == "Disabled":
                 # Enable vae decode on next Hold
-                last_helds["vae_decode"][my_unique_id] = True
+                update_value_by_id("vae_decode", my_unique_id, True)
                 return {"ui": {"images": list()},
-                        "result": (model, positive, negative, {"samples": latent}, vae, last_images,)}
+                        "result": (model, positive, negative, {"samples": latent}, vae, TSC_KSampler.empty_image,)}
             else:
                 # Decode images and store
                 images = vae.decode(latent).cpu()
-                last_helds["images"][my_unique_id] = images
+                update_value_by_id("images", my_unique_id, images)
 
                 # Disable vae decode on next Hold
-                last_helds["vae_decode"][my_unique_id] = False
+                update_value_by_id("vae_decode", my_unique_id, False)
 
                 # Generate image results and store
                 results = preview_images(images, filename_prefix)
-                last_helds["results"][my_unique_id] = results
+                update_value_by_id("results", my_unique_id, results)
 
                 # Output image results to ui and node outputs
                 return {"ui": {"images": results},
@@ -326,24 +498,24 @@ class TSC_KSampler:
             # If not in preview mode, return the results in the specified format
             if preview_image == "Disabled":
                 return {"ui": {"images": list()},
-                        "result": (model, positive, negative, last_latent, vae, last_images,)}
+                        "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
 
             # if preview_image == "Enabled":
             else:
                 latent = last_latent["samples"]
 
-                if last_helds["vae_decode"][my_unique_id] == True:
+                if get_value_by_id("vae_decode", my_unique_id) == True:
 
                     # Decode images and store
                     images = vae.decode(latent).cpu()
-                    last_helds["images"][my_unique_id] = images
+                    update_value_by_id("images", my_unique_id, images)
 
                     # Disable vae decode on next Hold
-                    last_helds["vae_decode"][my_unique_id] = False
+                    update_value_by_id("vae_decode", my_unique_id, False)
 
                     # Generate image results and store
                     results = preview_images(images, filename_prefix)
-                    last_helds["results"][my_unique_id] = results
+                    update_value_by_id("results", my_unique_id, results)
 
                 else:
                     images = last_images
@@ -365,6 +537,11 @@ class TSC_KSampler:
 
             if (X_type == "Nothing" and Y_type == "Nothing"):
                 print('\033[31mKSampler(Efficient)[{}] Error:\033[0m No valid script entry detected'.format(my_unique_id))
+                return {"ui": {"images": list()},
+                        "result": (model, positive, negative, last_latent, vae, last_images,)}
+
+            if vae == (None,):
+                print('\033[31mKSampler(Efficient)[{}] Error:\033[0m VAE must be connected to use Script mode.'.format(my_unique_id))
                 return {"ui": {"images": list()},
                         "result": (model, positive, negative, last_latent, vae, last_images,)}
 
@@ -420,12 +597,19 @@ class TSC_KSampler:
                 # If var_type is "Sampler", update sampler_name, scheduler, and generate labels
                 elif var_type == "Sampler":
                     sampler_name = var[0]
-                    if var[1] != None:
-                        scheduler[0] = var[1]
+                    if var[1] == "":
+                        text = f"{sampler_name}"
                     else:
-                        scheduler[0] = scheduler[1]
-                    text = f"{sampler_name} ({scheduler[0]})"
+                        if var[1] != None:
+                            scheduler[0] = var[1]
+                        else:
+                            scheduler[0] = scheduler[1]
+                        text = f"{sampler_name} ({scheduler[0]})"
                     text = text.replace("ancestral", "a").replace("uniform", "u")
+                # If var_type is "Scheduler", update scheduler and generate labels
+                elif var_type == "Scheduler":
+                    scheduler[0] = var
+                    text = f"{scheduler[0]}"
                 # If var_type is "Denoise", update denoise and generate labels
                 elif var_type == "Denoise":
                     denoise = var
@@ -546,7 +730,7 @@ class TSC_KSampler:
 
 
             def adjusted_font_size(text, initial_font_size, max_width):
-                font = ImageFont.truetype('arial.ttf', initial_font_size)
+                font = ImageFont.truetype(str(Path(font_path)), initial_font_size)
                 text_width, _ = font.getsize(text)
 
                 if text_width > (max_width * 0.9):
@@ -558,7 +742,7 @@ class TSC_KSampler:
                 return new_font_size
 
             # Disable vae decode on next Hold
-            last_helds["vae_decode"][my_unique_id] = False
+            update_value_by_id("vae_decode", my_unique_id, False)
 
             # Extract plot dimensions
             num_rows = max(len(Y_value) if Y_value is not None else 0, 1)
@@ -579,7 +763,7 @@ class TSC_KSampler:
             latent_new = torch.cat(latent_new, dim=0)
 
             # Store latent_new as last latent
-            last_helds["latent"][my_unique_id] = latent_new
+            update_value_by_id("latent", my_unique_id, latent_new)
 
             # Calculate the dimensions of the white background image
             border_size = max_width // 15
@@ -597,7 +781,7 @@ class TSC_KSampler:
                 bg_height = num_rows * max_height + (num_rows - 1) * grid_spacing
                 y_offset = 0
             else:
-                bg_height = num_rows * max_height + (num_rows - 1) * grid_spacing + 2.3 * border_size
+                bg_height = num_rows * max_height + (num_rows - 1) * grid_spacing + 3 * border_size
                 y_offset = border_size * 3
 
             # Create the white background image
@@ -630,7 +814,7 @@ class TSC_KSampler:
                         d = ImageDraw.Draw(label_bg)
 
                         # Create the font object
-                        font = ImageFont.truetype('arial.ttf', font_size)
+                        font = ImageFont.truetype(str(Path(font_path)), font_size)
 
                         # Calculate the text size and the starting position
                         text_width, text_height = d.textsize(text, font=font)
@@ -662,7 +846,7 @@ class TSC_KSampler:
                         d = ImageDraw.Draw(label_bg)
 
                         # Create the font object
-                        font = ImageFont.truetype('arial.ttf', font_size)
+                        font = ImageFont.truetype(str(Path(font_path)), font_size)
 
                         # Calculate the text size and the starting position
                         text_width, text_height = d.textsize(text, font=font)
@@ -695,18 +879,14 @@ class TSC_KSampler:
                 y_offset += img.height + grid_spacing
 
             images = pil2tensor(background)
-            last_helds["images"][my_unique_id] = images
+            update_value_by_id("images", my_unique_id, images)
 
             # Generate image results and store
             results = preview_images(images, filename_prefix)
-            last_helds["results"][my_unique_id] = results
+            update_value_by_id("results", my_unique_id, results)
 
-            # If not in preview mode, return the results in the specified format
-            if preview_image == "Disabled":
-                return {"ui": {"images": list()}, "result": (model, positive, negative, last_latent, vae, images,)}
-            else:
-                # Output image results to ui and node outputs
-                return {"ui": {"images": results}, "result": (model, positive, negative, {"samples": latent_new}, vae, images,)}
+            # Output image results to ui and node outputs
+            return {"ui": {"images": results}, "result": (model, positive, negative, {"samples": latent_new}, vae, images,)}
 
 
 # TSC XY Plot
@@ -718,6 +898,7 @@ class TSC_XYplot:
                "CFG Scale       5;10;15;20\n" \
                "Sampler(1)      dpmpp_2s_ancestral;euler;ddim\n" \
                "Sampler(2)      dpmpp_2m,karras;heun,normal\n" \
+               "Scheduler       normal;simple;karras\n" \
                "Denoise         .3;.4;.5;.6;.7\n" \
                "VAE             vae_1; vae_2; vae_3"
 
@@ -733,11 +914,11 @@ class TSC_XYplot:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-                    "X_type": (["Nothing", "Latent Batch", "Seeds++ Batch",
-                                 "Steps", "CFG Scale", "Sampler", "Denoise", "VAE"],),
+                    "X_type": (["Nothing", "Latent Batch", "Seeds++ Batch", "Steps", "CFG Scale",
+                                "Sampler", "Scheduler", "Denoise", "VAE"],),
                     "X_value": ("STRING", {"default": "", "multiline": False}),
-                    "Y_type": (["Nothing", "Latent Batch", "Seeds++ Batch",
-                                "Steps", "CFG Scale", "Sampler", "Denoise", "VAE"],),
+                    "Y_type": (["Nothing", "Latent Batch", "Seeds++ Batch", "Steps", "CFG Scale",
+                                "Sampler", "Scheduler", "Denoise", "VAE"],),
                     "Y_value": ("STRING", {"default": "", "multiline": False}),
                     "grid_spacing": ("INT", {"default": 0, "min": 0, "max": 500, "step": 5}),
                     "XY_flip": (["False","True"],),
@@ -791,6 +972,7 @@ class TSC_XYplot:
                 None if no validation was done or failed.
             """
 
+            # Seeds++ Batch
             if value_type == "Seeds++ Batch":
                 try:
                     x = float(value)
@@ -812,6 +994,7 @@ class TSC_XYplot:
                     x = bounds["Seeds++ Batch"]["max"]
 
                 return x
+            # Steps
             elif value_type == "Steps":
                 try:
                     x = int(value)
@@ -822,6 +1005,7 @@ class TSC_XYplot:
                     print(
                         f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid Step count.")
                     return None
+            # CFG Scale
             elif value_type == "CFG Scale":
                 try:
                     x = float(value)
@@ -835,6 +1019,7 @@ class TSC_XYplot:
                         f"\033[31mXY Plot Error:\033[0m '{value}' is not a number between {bounds['CFG Scale']['min']}"
                         f" and {bounds['CFG Scale']['max']} for CFG Scale.")
                     return None
+            # Sampler
             elif value_type == "Sampler":
                 if isinstance(value, str) and ',' in value:
                     value = tuple(map(str.strip, value.split(',')))
@@ -869,6 +1054,16 @@ class TSC_XYplot:
                         return None
                     else:
                         return value, None
+            # Scheduler
+            elif value_type == "Scheduler":
+                if value not in bounds["Scheduler"]["options"]:
+                    valid_schedulers = '\n'.join(bounds["Scheduler"]["options"])
+                    print(
+                        f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid Scheduler. Valid Schedulers are:\n{valid_schedulers}")
+                    return None
+                else:
+                    return value
+            # Denoise
             elif value_type == "Denoise":
                 try:
                     x = float(value)
@@ -882,6 +1077,7 @@ class TSC_XYplot:
                         f"\033[31mXY Plot Error:\033[0m '{value}' is not a number between {bounds['Denoise']['min']} "
                         f"and {bounds['Denoise']['max']} for Denoise.")
                     return None
+            # VAE
             elif value_type == "VAE":
                 if value not in bounds["VAE"]["options"]:
                     valid_vaes = '\n'.join(bounds["VAE"]["options"])
@@ -938,6 +1134,14 @@ class TSC_XYplot:
                 if Y_value[i] == None:
                     # Reset variables to default values and return
                     return (reset_variables(),)
+
+        # Clean Schedulers from Sampler data (if other type is Scheduler)
+        if X_type == "Sampler" and Y_type == "Scheduler":
+            # Clear X_value Scheduler's
+            X_value = [[x[0], ""] for x in X_value]
+        elif Y_type == "Sampler" and X_type == "Scheduler":
+            # Clear Y_value Scheduler's
+            Y_value = [[y[0], ""] for y in Y_value]
 
         # Clean X/Y_values
         if X_type == "Nothing" or X_type == "Latent Batch":
