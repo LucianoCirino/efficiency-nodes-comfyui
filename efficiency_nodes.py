@@ -255,56 +255,6 @@ class TSC_EfficientLoader:
 
         return (model, [[clip.encode(positive), {}]], [[clip.encode(negative), {}]], {"samples":latent}, vae, clip, )
 
-# KSampler Efficient ID finder
-last_returned_ids = {}
-def find_k_sampler_id(prompt, sampler_state=None, seed=None, steps=None, cfg=None,
-                      sampler_name=None, scheduler=None, denoise=None, preview_image=None):
-    global last_returned_ids
-
-    input_params = [
-        ('sampler_state', sampler_state),
-        ('seed', seed),
-        ('steps', steps),
-        ('cfg', cfg),
-        ('sampler_name', sampler_name),
-        ('scheduler', scheduler),
-        ('denoise', denoise),
-        ('preview_image', preview_image),
-    ]
-
-    matching_ids = []
-
-    for key, value in prompt.items():
-        if value.get('class_type') == 'KSampler (Efficient)':
-            inputs = value['inputs']
-            match = all(inputs[param_name] == param_value for param_name, param_value in input_params if param_value is not None)
-
-            if match:
-                matching_ids.append(key)
-
-    if matching_ids:
-        input_key = tuple(param_value for param_name, param_value in input_params)
-
-        if input_key in last_returned_ids:
-            last_id = last_returned_ids[input_key]
-            next_id = None
-            for id in matching_ids:
-                if id > last_id:
-                    if next_id is None or id < next_id:
-                        next_id = id
-
-            if next_id is None:
-                # All IDs have been used; start again from the first one
-                next_id = min(matching_ids)
-
-        else:
-            next_id = min(matching_ids)
-
-        last_returned_ids[input_key] = next_id
-        return next_id
-    else:
-        last_returned_ids.clear()
-        return None
 
 # TSC KSampler (Efficient)
 last_helds: dict[str, list] = {
@@ -339,7 +289,7 @@ class TSC_KSampler:
                      },
                 "optional": { "optional_vae": ("VAE",),
                               "script": ("SCRIPT",),},
-                "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
+                "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO", "my_unique_id": "UNIQUE_ID",},
                 }
 
     RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "LATENT", "VAE", "IMAGE", )
@@ -349,7 +299,8 @@ class TSC_KSampler:
     CATEGORY = "Efficiency Nodes/Sampling"
     
     def sample(self, sampler_state, model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-               latent_image, preview_image, denoise=1.0, prompt=None, extra_pnginfo=None, optional_vae=(None,), script=None):
+               latent_image, preview_image, denoise=1.0, prompt=None, extra_pnginfo=None, my_unique_id=None,
+               optional_vae=(None,), script=None):
 
         # Functions for previewing images in Ksampler
         def map_filename(filename):
@@ -424,7 +375,11 @@ class TSC_KSampler:
             last_helds[key].append((new_value, my_unique_id))
             return True
 
-        my_unique_id = int(find_k_sampler_id(prompt, sampler_state, seed, steps, cfg, sampler_name,scheduler, denoise, preview_image))
+        # Clean Efficient Loader Models from Global
+        update_loaded_objects(prompt)
+
+        # Convert ID string to an integer
+        my_unique_id = int(my_unique_id)
 
         # Vae input check
         vae = optional_vae
