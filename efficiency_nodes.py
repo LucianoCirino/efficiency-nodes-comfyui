@@ -2,18 +2,22 @@
 #  by Luciano Cirino (Discord: TSC#9184) - April 2023
 
 from comfy.sd import ModelPatcher, CLIP, VAE
-from nodes import common_ksampler
+from nodes import common_ksampler, CLIPSetLastLayer
+
 from torch import Tensor
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 from PIL.PngImagePlugin import PngInfo
 import numpy as np
 import torch
 
+import ast
 from pathlib import Path
 import os
 import sys
+import subprocess
 import json
 import folder_paths
+import psutil
 
 # Get the absolute path of the parent directory of the current script
 my_dir = os.path.dirname(os.path.abspath(__file__))
@@ -42,168 +46,322 @@ def tensor2pil(image: torch.Tensor) -> Image.Image:
 def pil2tensor(image: Image.Image) -> torch.Tensor:
     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
 
-def resolve_input_links(prompt, input_value):
-    if isinstance(input_value, list) and len(input_value) == 2:
-        input_id, input_index = input_value
-        return prompt[input_id]['inputs'][list(prompt[input_id]['inputs'].keys())[input_index]]
-    return input_value
+def extract_node_info(prompt, id, indirect_key=None):
+    # Convert ID to string
+    id = str(id)
+    node_id = None
+
+    # If an indirect_key (like 'script') is provided, perform a two-step lookup
+    if indirect_key:
+        # Ensure the id exists in the prompt and has an 'inputs' entry with the indirect_key
+        if id in prompt and 'inputs' in prompt[id] and indirect_key in prompt[id]['inputs']:
+            # Extract the indirect_id
+            indirect_id = prompt[id]['inputs'][indirect_key][0]
+
+            # Ensure the indirect_id exists in the prompt
+            if indirect_id in prompt:
+                node_id = indirect_id
+                return prompt[indirect_id].get('class_type', None), node_id
+
+        # If indirect_key is not found within the prompt
+        return None, None
+
+    # If no indirect_key is provided, perform a direct lookup
+    return prompt.get(id, {}).get('class_type', None), node_id
+
+def extract_node_value(prompt, id, key):
+    # If ID is in data, return its 'inputs' value for a given key. Otherwise, return None.
+    return prompt.get(str(id), {}).get('inputs', {}).get(key, None)
 
 # Cache models in RAM
 loaded_objects = {
-    "ckpt": [], # (ckpt_name, model)
-    "clip": [], # (ckpt_name, clip)
-    "bvae": [], # (ckpt_name, vae)
-    "vae": [],   # (vae_name, vae)
-    "lora": [] # (lora_name, model_name, model_lora, clip_lora, strength_model, strength_clip)
+    "ckpt": [], # (ckpt_name, ckpt_model, clip, bvae, [id])
+    "vae": [],  # (vae_name, vae, [id])
+    "lora": []  # (lora_name, ckpt_name, lora_model, clip_lora, strength_model, strength_clip, [id])
 }
 
-def print_loaded_objects_entries():
+def print_loaded_objects_entries(id=None, prompt=None, show_id=False):
     print("\n" + "-" * 40)  # Print an empty line followed by a separator line
+    if id is not None:
+        id = str(id)  # Convert ID to string
+    if prompt is not None and id is not None:
+        node_name, _ = extract_node_info(prompt, id)
+        if show_id:
+            print(f"\033[36m{node_name} Models Cache: (node_id:{int(id)})\033[0m")
+        else:
+            print(f"\033[36m{node_name} Models Cache:\033[0m")
+    elif id is None:
+        print(f"\033[36mGlobal Models Cache:\033[0m")
+    else:
+        print(f"\033[36mModels Cache: \nnode_id:{int(id)}\033[0m")
+    print("- " * 20)  # Print an empty line followed by a separator line
+    for key in ["ckpt", "vae", "lora"]:
+        entries_with_id = loaded_objects[key] if id is None else [entry for entry in loaded_objects[key] if id in entry[-1]]
+        if not entries_with_id:  # If no entries with the chosen ID, print None and skip this key
+            continue
+        print(f"{key.capitalize()}:")
+        for i, entry in enumerate(entries_with_id, 1):  # Start numbering from 1
+            truncated_name = entry[0][:50]  # Truncate at 50 characters
+            if key == "lora":
+                lora_weight_rounded = round(entry[4], 3)  # Round lora_weight to 3 decimal places
+                if id is None:
+                    associated_ids = ', '.join(map(str, entry[-1]))  # Gather all associated ids
+                    print(f"  [{i}] {truncated_name} (ids: {associated_ids}, lora_weight: {lora_weight_rounded}, ckpt_name: {entry[1]})")
+                else:
+                    print(f"  [{i}] {truncated_name} (lora_weight: {lora_weight_rounded}, base_ckpt: {entry[1]})")
+            else:
+                if id is None:
+                    associated_ids = ', '.join(map(str, entry[-1]))  # Gather all associated ids
+                    print(f"  [{i}] {truncated_name} (ids: {associated_ids})")
+                else:
+                    print(f"  [{i}] {truncated_name}")
+    #print("-" * 40)  # Print a separator line
+    #print("\n")  # Print an empty line
 
-    for key in ["ckpt", "clip", "bvae", "vae", "lora"]:
-        print(f"{key.capitalize()} entries:")
-        for entry in loaded_objects[key]:
-            truncated_name = entry[0][:20]
-            print(f"  Name: {truncated_name}\n  Location: {entry[1]}")
-            if len(entry) == 3:
-                print(f"  Entry[2]: {entry[2]}")
-        print("-" * 40)  # Print a separator line
-
-    print("\n")  # Print an empty line
-
-
-def update_loaded_objects(prompt):
+# This function cleans global variables associated with nodes that are no longer detected on UI
+def globals_cleanup(prompt):
     global loaded_objects
+    global last_helds
 
-    # Extract all Efficient Loader class type entries
-    efficient_loader_entries = [entry for entry in prompt.values() if entry["class_type"] == "Efficient Loader"]
+    # Step 1: Clean up last_helds
+    for key in list(last_helds.keys()):
+        original_length = len(last_helds[key])
+        last_helds[key] = [(value, id) for value, id in last_helds[key] if str(id) in prompt.keys()]
+        ###if original_length != len(last_helds[key]):
+            ###print(f'Updated {key} in last_helds: {last_helds[key]}')
 
-    # Collect all desired model, vae, and lora names
-    desired_ckpt_names = set()
-    desired_vae_names = set()
-    desired_lora_names = set()
-    for entry in efficient_loader_entries:
-        desired_ckpt_names.add(entry["inputs"]["ckpt_name"])
-        desired_vae_names.add(entry["inputs"]["vae_name"])
-        desired_lora_names.add(entry["inputs"]["lora_name"])
+    # Step 2: Clean up loaded_objects
+    for key in list(loaded_objects.keys()):
+        for i, tup in enumerate(list(loaded_objects[key])):
+            # Remove ids from id array in each tuple that don't exist in prompt
+            id_array = [id for id in tup[-1] if str(id) in prompt.keys()]
+            if len(id_array) != len(tup[-1]):
+                if id_array:
+                    loaded_objects[key][i] = tup[:-1] + (id_array,)
+                    ###print(f'Updated tuple at index {i} in {key} in loaded_objects: {loaded_objects[key][i]}')
+                else:
+                    # If id array becomes empty, delete the corresponding tuple
+                    loaded_objects[key].remove(tup)
+                    ###print(f'Deleted tuple at index {i} in {key} in loaded_objects because its id array became empty.')
 
-    # Check and clear unused ckpt, clip, and bvae entries
-    for list_key in ["ckpt", "clip", "bvae"]:
-        unused_indices = [i for i, entry in enumerate(loaded_objects[list_key]) if entry[0] not in desired_ckpt_names]
-        for index in sorted(unused_indices, reverse=True):
-            loaded_objects[list_key].pop(index)
-
-    # Check and clear unused vae entries
-    unused_vae_indices = [i for i, entry in enumerate(loaded_objects["vae"]) if entry[0] not in desired_vae_names]
-    for index in sorted(unused_vae_indices, reverse=True):
-        loaded_objects["vae"].pop(index)
-
-    # Check and clear unused lora entries
-    unused_lora_indices = [i for i, entry in enumerate(loaded_objects["lora"]) if entry[0] not in desired_lora_names]
-    for index in sorted(unused_lora_indices, reverse=True):
-        loaded_objects["lora"].pop(index)
-
-
-def load_checkpoint(ckpt_name,output_vae=True, output_clip=True):
+def load_checkpoint(ckpt_name, id, output_vae=True, cache=None):
     """
     Searches for tuple index that contains ckpt_name in "ckpt" array of loaded_objects.
     If found, extracts the model, clip, and vae from the loaded_objects.
-    If not found, loads the checkpoint, extracts the model, clip, and vae, and adds them to the loaded_objects.
-    Returns the model, clip, and vae.
+    If not found, loads the checkpoint, extracts the model, clip, and vae.
+    The id parameter represents the node ID and is used for caching models for the XY Plot node.
+    If the cache limit is reached for a specific id, clears the cache and returns the loaded model, clip, and vae without adding a new entry.
+    If there is cache space, adds the id to the ids list if it's not already there.
+    If there is cache space and the checkpoint was not found in loaded_objects, adds a new entry to loaded_objects.
+
+    Parameters:
+    - ckpt_name: name of the checkpoint to load.
+    - id: an identifier for caching models for specific nodes.
+    - output_vae: boolean, if True loads the VAE too.
+    - cache (optional): an integer that specifies how many checkpoint entries with a given id can exist in loaded_objects. Defaults to None.
     """
     global loaded_objects
 
-    # Search for tuple index that contains ckpt_name in "ckpt" array of loaded_objects
-    checkpoint_found = False
-    for i, entry in enumerate(loaded_objects["ckpt"]):
+    for entry in loaded_objects["ckpt"]:
         if entry[0] == ckpt_name:
-            # Extract the second element of the tuple at 'i' in the "ckpt", "clip", "bvae" arrays
-            model = loaded_objects["ckpt"][i][1]
-            clip = loaded_objects["clip"][i][1]
-            vae = loaded_objects["bvae"][i][1]
-            checkpoint_found = True
-            break
+            _, model, clip, vae, ids = entry
+            cache_full = cache and len([entry for entry in loaded_objects["ckpt"] if id in entry[-1]]) >= cache
 
-    # If not found, load ckpt
-    if checkpoint_found == False:
-        # Load Checkpoint
-        ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
-        out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True,
-                                                    embedding_directory=folder_paths.get_folder_paths("embeddings"))
-        model = out[0]
-        clip = out[1]
-        vae = out[2]
+            if cache_full:
+                clear_cache(id, cache, "ckpt")
+            elif id not in ids:
+                ids.append(id)
 
-        # Update loaded_objects[] array
-        loaded_objects["ckpt"].append((ckpt_name, out[0]))
-        loaded_objects["clip"].append((ckpt_name, out[1]))
-        loaded_objects["bvae"].append((ckpt_name, out[2]))
+            return model, clip, vae
+
+    ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
+    out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae, output_clip=True,
+                                                embedding_directory=folder_paths.get_folder_paths("embeddings"))
+    model = out[0]
+    clip = out[1]
+    vae = out[2]  # bvae
+
+    if cache:
+        if len([entry for entry in loaded_objects["ckpt"] if id in entry[-1]]) < cache:
+            loaded_objects["ckpt"].append((ckpt_name, model, clip, vae, [id]))
+        else:
+            clear_cache(id, cache, "ckpt")
 
     return model, clip, vae
 
-
-def load_vae(vae_name):
+def load_vae(vae_name, id, cache=None):
     """
     Extracts the vae with a given name from the "vae" array in loaded_objects.
     If the vae is not found, creates a new VAE object with the given name and adds it to the "vae" array.
+    Also stores the id parameter, which is used for caching models specifically for nodes with the given ID.
+    If the cache limit is reached for a specific id, returns the loaded vae without adding id or making a new entry in loaded_objects.
+    If there is cache space, and the id is not in the ids list, adds the id to the ids list.
+    If there is cache space, and the vae was not found in loaded_objects, adds a new entry to the loaded_objects.
+
+    Parameters:
+    - vae_name: name of the VAE to load.
+    - id (optional): an identifier for caching models for specific nodes. Defaults to None.
+    - cache (optional): an integer that specifies how many vae entries with a given id can exist in loaded_objects. Defaults to None.
     """
     global loaded_objects
 
-    # Check if vae_name exists in "vae" array
-    if any(entry[0] == vae_name for entry in loaded_objects["vae"]):
-        # Extract the second tuple entry of the checkpoint
-        vae = [entry[1] for entry in loaded_objects["vae"] if entry[0] == vae_name][0]
-    else:
-        vae_path = folder_paths.get_full_path("vae", vae_name)
-        vae = comfy.sd.VAE(ckpt_path=vae_path)
-        # Update loaded_objects[] array
-        loaded_objects["vae"].append((vae_name, vae))
+    for i, entry in enumerate(loaded_objects["vae"]):
+        if entry[0] == vae_name:
+            vae, ids = entry[1], entry[2]
+            if id not in ids:
+                if cache and len([entry for entry in loaded_objects["vae"] if id in entry[-1]]) >= cache:
+                    return vae
+                ids.append(id)
+            if cache:
+                clear_cache(id, cache, "vae")
+            return vae
+
+    vae_path = folder_paths.get_full_path("vae", vae_name)
+    vae = comfy.sd.VAE(ckpt_path=vae_path)
+
+    if cache:
+        if len([entry for entry in loaded_objects["vae"] if id in entry[-1]]) < cache:
+            loaded_objects["vae"].append((vae_name, vae, [id]))
+        else:
+            clear_cache(id, cache, "vae")
+
     return vae
 
-
-def load_lora(lora_name, model, clip, strength_model, strength_clip):
+def load_lora(lora_name, ckpt_name, strength_model, strength_clip, id, cache=None):
     """
     Extracts the Lora model with a given name from the "lora" array in loaded_objects.
-    If the Lora model is not found or the strength values change or the original model has changed, creates a new Lora object with the given name and adds it to the "lora" array.
+    If the Lora model is not found or strength values changed or model changed, creates a new Lora object with the given name and adds it to the "lora" array.
+    Also stores the id parameter, which is used for caching models specifically for nodes with the given ID.
+    If the cache limit is reached for a specific id, clears the cache and returns the loaded Lora model and clip without adding a new entry.
+    If there is cache space, adds the id to the ids list if it's not already there.
+    If there is cache space and the Lora model was not found in loaded_objects, adds a new entry to loaded_objects.
+
+    Parameters:
+    - lora_name: name of the Lora model to load.
+    - ckpt_name: name of the checkpoint from which the Lora model is created.
+    - strength_model: strength of the Lora model.
+    - strength_clip: strength of the clip in the Lora model.
+    - id: an identifier for caching models for specific nodes.
+    - cache (optional): an integer that specifies how many Lora entries with a given id can exist in loaded_objects. Defaults to None.
     """
     global loaded_objects
 
-    # Get the model_name (ckpt_name) from the first entry in loaded_objects
-    model_name = loaded_objects["ckpt"][0][0] if loaded_objects["ckpt"] else None
+    for entry in loaded_objects["lora"]:
+        if entry[0] == lora_name and entry[1] == ckpt_name and entry[4] == strength_model and entry[5] == strength_clip:
+            _, _, lora_model, lora_clip, _, _, ids = entry
+            cache_full = cache and len([entry for entry in loaded_objects["lora"] if id in entry[-1]]) >= cache
 
-    # Check if lora_name exists in "lora" array
-    existing_lora = [entry for entry in loaded_objects["lora"] if entry[0] == lora_name]
+            if cache_full:
+                clear_cache(id, cache, "lora")
+            elif id not in ids:
+                ids.append(id)
 
-    if existing_lora:
-        lora_name, stored_model_name, model_lora, clip_lora, stored_strength_model, stored_strength_clip = existing_lora[0]
+            return lora_model, lora_clip
 
-        # Check if the model_name, strength_model, and strength_clip are the same
-        if model_name == stored_model_name and strength_model == stored_strength_model and strength_clip == stored_strength_clip:
-            # Check if the model has not changed in the loaded_objects
-            existing_model = [entry for entry in loaded_objects["ckpt"] if entry[0] == model_name]
-            if existing_model and existing_model[0][1] == model:
-                return model_lora, clip_lora
-
-    # If Lora model not found or strength values changed or model changed, generate new Lora models
+    ckpt, clip, _ = load_checkpoint(ckpt_name, id, output_vae=False, cache=None)
     lora_path = folder_paths.get_full_path("loras", lora_name)
-    model_lora, clip_lora = comfy.sd.load_lora_for_models(model, clip, lora_path, strength_model, strength_clip)
+    lora_model, lora_clip = comfy.sd.load_lora_for_models(ckpt, clip, lora_path, strength_model, strength_clip)
 
-    # Remove existing Lora model if it exists
-    if existing_lora:
-        loaded_objects["lora"].remove(existing_lora[0])
+    if cache:
+        if len([entry for entry in loaded_objects["lora"] if id in entry[-1]]) < cache:
+            loaded_objects["lora"].append((lora_name, ckpt_name, lora_model, lora_clip, strength_model, strength_clip, [id]))
+        else:
+            clear_cache(id, cache, "lora")
 
-    # Update loaded_objects[] array
-    loaded_objects["lora"].append((lora_name, model_name, model_lora, clip_lora, strength_model, strength_clip))
-
-    return model_lora, clip_lora
+    return lora_model, lora_clip
 
 
+def clear_cache(id, cache, dict_name):
+    """
+    Clear the cache for a specific id in a specific dictionary (either "ckpt" or "vae").
+    If the cache limit is reached for a specific id, deletes the id from the oldest entry.
+    If the id array of the entry becomes empty, deletes the entry.
+    """
+    # Get all entries associated with the id_element
+    id_associated_entries = [entry for entry in loaded_objects[dict_name] if id in entry[-1]]
+    while len(id_associated_entries) > cache:
+        # Identify an older entry (but not necessarily the oldest) containing id
+        older_entry = id_associated_entries[0]
+        # Remove the id_element from the older entry
+        older_entry[-1].remove(id)
+        # If the id array of the older entry becomes empty after this, delete the entry
+        if not older_entry[-1]:
+            loaded_objects[dict_name].remove(older_entry)
+        # Update the id_associated_entries
+        id_associated_entries = [entry for entry in loaded_objects[dict_name] if id in entry[-1]]
+
+def clear_cache_by_exception(node_id, vae_dict=None, ckpt_dict=None, lora_dict=None):
+    """
+    This function deletes a specific ID from tuples in one or more specified dictionaries in the global 'loaded_objects' variable.
+    The function requires the 'node_id' to delete and takes optional arguments for each dictionary ('vae_dict', 'ckpt_dict', 'lora_dict').
+    If an argument is None, the function does nothing for that dictionary.
+    If an argument is an empty list, the function deletes the 'node_id' from all tuples in that dictionary.
+    For 'lora_dict', exceptions to deletion can be passed as a list of tuples.
+
+    node_id : The ID to delete.
+    vae_dict : The 'vae' dictionary exceptions. If empty list, delete 'node_id' from all 'vae' tuples. If None, do nothing.
+    ckpt_dict : The 'ckpt' dictionary exceptions. If empty list, delete 'node_id' from all 'ckpt' tuples. If None, do nothing.
+    lora_dict : The 'lora' dictionary exceptions. Each exception is a tuple of ('lora_name', 'ckpt_name', 'strength_model', 'strength_clip').
+                If empty list, delete 'node_id' from all 'lora' tuples. If None, do nothing.
+    """
+    global loaded_objects  # reference the global variable 'loaded_objects'
+
+    # Create a dictionary to map argument names to 'loaded_objects' dictionary names
+    dict_mapping = {
+        "vae_dict": "vae",
+        "ckpt_dict": "ckpt",
+        "lora_dict": "lora"
+    }
+
+    # Loop over the input arguments
+    for arg_name, arg_val in {"vae_dict": vae_dict, "ckpt_dict": ckpt_dict, "lora_dict": lora_dict}.items():
+        # Skip if argument is None
+        if arg_val is None:
+            continue
+
+        dict_name = dict_mapping[arg_name]  # get the corresponding dictionary name in 'loaded_objects'
+
+        # Iterate over a copy of the list to allow modification during iteration
+        for tuple_idx, tuple_item in enumerate(loaded_objects[dict_name].copy()):
+            # Handle 'lora_dict' exceptions differently, checking if the tuple matches one in exceptions
+            if arg_name == "lora_dict" and (tuple_item[0], tuple_item[1], tuple_item[4], tuple_item[5]) in arg_val:
+                continue
+            # For 'ckpt_dict' and 'vae_dict', check if the name is in exceptions
+            elif tuple_item[0] in arg_val:
+                continue
+
+            # Check if the 'node_id' is in the id array of the tuple
+            if node_id in tuple_item[-1]:
+                # Remove the 'node_id' from the id array
+                tuple_item[-1].remove(node_id)
+
+                # If the id array becomes empty, remove the entire tuple
+                if not tuple_item[-1]:
+                    loaded_objects[dict_name].remove(tuple_item)
+
+# Retrieve the cache number from 'cache_settings' json file
+def get_cache_numbers(node_name):
+    # Get the directory path of the current file
+    my_dir = os.path.dirname(os.path.abspath(__file__))
+    # Construct the file path for cache_settings.json
+    settings_file = os.path.join(my_dir, 'cache_settings.json')
+    # Load the settings from the JSON file
+    with open(settings_file, 'r') as file:
+        cache_settings = json.load(file)
+    # Retrieve the cache numbers for the given node
+    cache_numbers = cache_settings.get(node_name, {})
+    vae_cache = int(cache_numbers.get('vae', 1))
+    ckpt_cache = int(cache_numbers.get('ckpt', 1))
+    lora_cache = int(cache_numbers.get('lora', 1))
+    return vae_cache, ckpt_cache, lora_cache
+
+########################################################################################################################
 # TSC Efficient Loader
 class TSC_EfficientLoader:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": { "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
+        return {"required": { "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
                               "vae_name": (["Baked VAE"] + folder_paths.get_filename_list("vae"),),
                               "clip_skip": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
                               "lora_name": (["None"] + folder_paths.get_filename_list("loras"),),
@@ -214,15 +372,18 @@ class TSC_EfficientLoader:
                               "empty_latent_width": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 64}),
                               "empty_latent_height": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 64}),
                               "batch_size": ("INT", {"default": 1, "min": 1, "max": 64})},
-                "hidden": {"prompt": "PROMPT"}}
+                "hidden": { "prompt": "PROMPT",
+                            "my_unique_id": "UNIQUE_ID",},
+                }
 
-    RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "LATENT", "VAE", "CLIP" ,)
-    RETURN_NAMES = ("MODEL", "CONDITIONING+", "CONDITIONING-", "LATENT", "VAE", "CLIP", )
+    RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "LATENT", "VAE", "DEPENDENCIES",)
+    RETURN_NAMES = ("MODEL", "CONDITIONING+", "CONDITIONING-", "LATENT", "VAE", "DEPENDENCIES", )
     FUNCTION = "efficientloader"
     CATEGORY = "Efficiency Nodes/Loaders"
 
     def efficientloader(self, ckpt_name, vae_name, clip_skip, lora_name, lora_model_strength, lora_clip_strength,
-                        positive, negative, empty_latent_width, empty_latent_height, batch_size, prompt=None):
+                        positive, negative, empty_latent_width, empty_latent_height, batch_size,
+                        prompt=None, my_unique_id=None):
 
         model: ModelPatcher | None = None
         clip: CLIP | None = None
@@ -231,21 +392,21 @@ class TSC_EfficientLoader:
         # Create Empty Latent
         latent = torch.zeros([batch_size, 4, empty_latent_height // 8, empty_latent_width // 8]).cpu()
 
-        # Clean models from loaded_objects
-        update_loaded_objects(prompt)
+        # Clean globally stored objects
+        globals_cleanup(prompt)
+
+        # Retrieve cache numbers
+        vae_cache, ckpt_cache, lora_cache = get_cache_numbers("Efficient Loader")
 
         # Load models
-        model, clip, vae = load_checkpoint(ckpt_name)
+        model, clip, vae = load_checkpoint(ckpt_name, my_unique_id, cache=ckpt_cache)
 
         if lora_name != "None":
-            model, clip = load_lora(lora_name, model, clip, lora_model_strength, lora_clip_strength)
-            # note:  load_lora only works properly (as of now) when ckpt dictionary is only 1 entry long!
-        
+            model, clip = load_lora(lora_name, ckpt_name, lora_model_strength, lora_clip_strength,my_unique_id, cache=lora_cache)
+
         # Check for custom VAE
         if vae_name != "Baked VAE":
-            vae = load_vae(vae_name)
-
-        #print_loaded_objects_entries()
+            vae = load_vae(vae_name, my_unique_id, cache=vae_cache)
 
         # CLIP skip
         if not clip:
@@ -253,16 +414,45 @@ class TSC_EfficientLoader:
         clip = clip.clone()
         clip.clip_layer(clip_skip)
 
-        return (model, [[clip.encode(positive), {}]], [[clip.encode(negative), {}]], {"samples":latent}, vae, clip, )
+        # Data for XY Plot
+        dependencies = (vae_name, ckpt_name, clip, clip_skip, positive, negative)
 
+        return (model, [[clip.encode(positive), {}]], [[clip.encode(negative), {}]], {"samples":latent}, vae, dependencies, )
 
+########################################################################################################################
 # TSC KSampler (Efficient)
 last_helds: dict[str, list] = {
-    "results": [],
-    "latent": [],
-    "images": [],
-    "vae_decode": []
+    "results": [],      # (results, id) # Preview Images, stored as a pil image list
+    "latent": [],       # (latent, id)  # Latent outputs, stored as a latent tensor list
+    "images": [],       # (images, id)  # Image outputs, stored as an image tensor list
+    "vae_decode": [],   # (vae_decode, id) # Used to track wether to vae-decode or not
 }
+
+def print_last_helds(id=None):
+    print("\n" + "-" * 40)  # Print an empty line followed by a separator line
+    if id is not None:
+        id = str(id)  # Convert ID to string
+        print(f"Node-specific Last Helds (node_id:{int(id)})")
+    else:
+        print(f"Global Last Helds:")
+    print("- " * 20)  # Print an empty line followed by a separator line
+    for key in ["results", "latent", "images", "vae_decode"]:
+        entries_with_id = last_helds[key] if id is None else [entry for entry in last_helds[key] if id == entry[-1]]
+        if not entries_with_id:  # If no entries with the chosen ID, print None and skip this key
+            continue
+        print(f"{key.capitalize()}:")
+        for i, entry in enumerate(entries_with_id, 1):  # Start numbering from 1
+            if isinstance(entry[0], bool):  # Special handling for boolean types
+                output = entry[0]
+            else:
+                output = len(entry[0])
+            if id is None:
+                print(f"  [{i}] Output: {output} (id: {entry[-1]})")
+            else:
+                print(f"  [{i}] Output: {output}")
+    print("-" * 40)  # Print a separator line
+    print("\n")  # Print an empty line
+
 class TSC_KSampler:
     
     empty_image = pil2tensor(Image.new('RGBA', (1, 1), (0, 0, 0, 0)))
@@ -278,7 +468,7 @@ class TSC_KSampler:
                      "model": ("MODEL",),
                      "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                      "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
-                     "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0}),
+                     "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
                      "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                      "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
                      "positive": ("CONDITIONING",),
@@ -375,8 +565,8 @@ class TSC_KSampler:
             last_helds[key].append((new_value, my_unique_id))
             return True
 
-        # Clean Efficient Loader Models from Global
-        update_loaded_objects(prompt)
+        # Clean globally stored objects of non-existant nodes
+        globals_cleanup(prompt)
 
         # Convert ID string to an integer
         my_unique_id = int(my_unique_id)
@@ -412,6 +602,7 @@ class TSC_KSampler:
         # Define filename_prefix
         filename_prefix = "KSeff_{:02d}".format(my_unique_id)
 
+        # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
         # Check the current sampler state
         if sampler_state == "Sample":
 
@@ -447,8 +638,15 @@ class TSC_KSampler:
                 return {"ui": {"images": results},
                         "result": (model, positive, negative, {"samples": latent}, vae, images,)}
 
+        # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
         # If the sampler state is "Hold"
         elif sampler_state == "Hold":
+
+            #Debug
+            ###print_last_helds()
+            ###print_loaded_objects_entries()
+            ###print("\n" + "-" * 40)  # Print an empty line followed by a separator line
+
             # Print a message indicating that the KSampler is in "Hold" state with the unique ID
             print('\033[32mKSampler(Efficient)[{}]:\033[0mHeld'.format(my_unique_id))
 
@@ -482,638 +680,703 @@ class TSC_KSampler:
                 return {"ui": {"images": results},
                         "result": (model, positive, negative, {"samples": latent}, vae, images,)}
 
+        # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
         elif sampler_state == "Script":
 
-            # If no script input connected, set X_type and Y_type to "Nothing"
-            if script is None:
-                X_type = "Nothing"
-                Y_type = "Nothing"
-            else:
-                # Unpack script Tuple (X_type, X_value, Y_type, Y_value, grid_spacing, latent_id)
-                X_type, X_value, Y_type, Y_value, grid_spacing, latent_id = script
+            # Store name of connected node to script input
+            script_node_name, script_node_id = extract_node_info(prompt, my_unique_id, 'script')
 
-            if (X_type == "Nothing" and Y_type == "Nothing"):
-                print('\033[31mKSampler(Efficient)[{}] Error:\033[0m No valid script entry detected'.format(my_unique_id))
+            # If no valid script input connected, error out
+            if script == None or script == (None,) or (script_node_name!="XY Plot"):
+                print('\033[31mKSampler(Efficient)[{}] Error:\033[0m No valid script input detected'.format(my_unique_id))
                 return {"ui": {"images": list()},
                         "result": (model, positive, negative, last_latent, vae, last_images,)}
 
+            # If no vae connected, throw errors
             if vae == (None,):
                 print('\033[31mKSampler(Efficient)[{}] Error:\033[0m VAE must be connected to use Script mode.'.format(my_unique_id))
                 return {"ui": {"images": list()},
                         "result": (model, positive, negative, last_latent, vae, last_images,)}
 
-            # Extract the 'samples' tensor from the dictionary
-            latent_image_tensor = latent_image['samples']
+            # Extract the 'samples' tensor and split it into individual image tensors
+            image_tensors = torch.split(latent_image['samples'], 1, dim=0)
 
-            # Split the tensor into individual image tensors
-            image_tensors = torch.split(latent_image_tensor, 1, dim=0)
+            # Get the shape of the first image tensor
+            shape = image_tensors[0].shape
 
-            # Create a list of dictionaries containing the individual image tensors
-            latent_list = [{'samples': image} for image in image_tensors]
+            # Extract the original height and width
+            latent_height, latent_width = shape[2] * 8, shape[3] * 8
 
             # Set latent only to the first latent of batch
-            if latent_id >= len(latent_list):
-                print(
-                    f'\033[31mKSampler(Efficient)[{my_unique_id}] Warning:\033[0m '
-                    f'The selected latent_id ({latent_id}) is out of range.\n'
-                    f'Automatically setting the latent_id to the last image in the list (index: {len(latent_list) - 1}).')
-                latent_id = len(latent_list) - 1
+            latent_image = {'samples': image_tensors[0]}
 
-            latent_image = latent_list[latent_id]
+            #___________________________________________________________________________________________________________
+            # Initialize, unpack, and clean variables for the XY Plot script
+            if script_node_name == "XY Plot":
 
-            # Define X/Y_values for "Seeds++ Batch"
-            if X_type == "Seeds++ Batch":
-                X_value = [latent_image for _ in range(X_value[0])]
-            if Y_type == "Seeds++ Batch":
-                Y_value = [latent_image for _ in range(Y_value[0])]
+                # Initialize variables
+                vae_name = None
+                ckpt_name = None
+                clip = None
+                lora_name = None
+                lora_model_wt = None
+                lora_clip_wt = None
+                positive_prompt = None
+                negative_prompt = None
+                clip_skip = None
 
-            # Define X/Y_values for "Latent Batch"
-            if X_type == "Latent Batch":
-                X_value = latent_list
-            if Y_type == "Latent Batch":
-                Y_value = latent_list
+                # Unpack script Tuple (X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, dependencies)
+                X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models, dependencies = script
 
-            # Embedd information into "Scheduler" X/Y_values for text label
-            if X_type == "Scheduler" and Y_type != "Sampler":
-                # X_value second list value of each array entry = None
-                for i in range(len(X_value)):
-                    if len(X_value[i]) == 2:
-                        X_value[i][1] = None
-                    else:
-                        X_value[i] = [X_value[i], None]
-            if Y_type == "Scheduler" and X_type != "Sampler":
-                # Y_value second list value of each array entry = None
-                for i in range(len(Y_value)):
-                    if len(Y_value[i]) == 2:
-                        Y_value[i][1] = None
-                    else:
-                        Y_value[i] = [Y_value[i], None]
+                # Unpack Effficient Loader dependencies
+                if dependencies is not None:
+                    vae_name, ckpt_name, clip, clip_skip, positive_prompt, negative_prompt = dependencies
 
-            def define_variable(var_type, var, seed, steps, cfg,sampler_name, scheduler, latent_image, denoise,
-                                vae_name, var_label, num_label):
-
-                # If var_type is "Seeds++ Batch", update var and seed, and generate labels
-                if var_type == "Latent Batch":
-                    latent_image = var
-                    text = f"{len(var_label)}"
-                # If var_type is "Seeds++ Batch", update var and seed, and generate labels
-                elif var_type == "Seeds++ Batch":
-                    text = f"seed: {seed}"
-                # If var_type is "Steps", update steps and generate labels
-                elif var_type == "Steps":
-                    steps = var
-                    text = f"Steps: {steps}"
-                # If var_type is "CFG Scale", update cfg and generate labels
-                elif var_type == "CFG Scale":
-                    cfg = var
-                    text = f"CFG Scale: {cfg}"
-                # If var_type is "Sampler", update sampler_name, scheduler, and generate labels
-                elif var_type == "Sampler":
-                    sampler_name = var[0]
-                    if var[1] == "":
-                        text = f"{sampler_name}"
-                    else:
-                        if var[1] != None:
-                            scheduler[0] = var[1]
-                        else:
-                            scheduler[0] = scheduler[1]
-                        text = f"{sampler_name} ({scheduler[0]})"
-                    text = text.replace("ancestral", "a").replace("uniform", "u")
-                # If var_type is "Scheduler", update scheduler and generate labels
-                elif var_type == "Scheduler":
-                    scheduler[0] = var[0]
-                    if len(var) == 2:
-                        text = f"{sampler_name} ({var[0]})"
-                    else:
-                        text = f"{var}"
-                    text = text.replace("ancestral", "a").replace("uniform", "u")
-                # If var_type is "Denoise", update denoise and generate labels
-                elif var_type == "Denoise":
-                    denoise = var
-                    text = f"Denoise: {denoise}"
-                # For any other var_type, set text to "?"
-                elif var_type == "VAE":
-                    vae_name = var
-                    text = f"VAE: {vae_name}"
-                # For any other var_type, set text to ""
+                # If not caching models, set to 1.
+                if cache_models == "False":
+                    vae_cache = ckpt_cache = lora_cache = 1
                 else:
-                    text = ""
+                    # Retrieve cache numbers
+                    vae_cache, ckpt_cache, lora_cache = get_cache_numbers("XY Plot")
+                # Pack cache numbers in a tuple
+                cache = (vae_cache, ckpt_cache, lora_cache)
 
-                def truncate_texts(texts, num_label):
-                    min_length = min([len(text) for text in texts])
-                    truncate_length = min(min_length, 24)
-
-                    if truncate_length < 16:
-                        truncate_length = 16
-
-                    truncated_texts = []
-                    for text in texts:
-                        if len(text) > truncate_length:
-                            text = text[:truncate_length] + "..."
-                        truncated_texts.append(text)
-
-                    return truncated_texts
-
-                # Add the generated text to var_label if it's not full
-                if len(var_label) < num_label:
-                    var_label.append(text)
-
-                # If var_type VAE , truncate entries in the var_label list when it's full
-                if len(var_label) == num_label and var_type == "VAE":
-                    var_label = truncate_texts(var_label, num_label)
-
-                # Return the modified variables
-                return steps, cfg,sampler_name, scheduler, latent_image, denoise, vae_name, var_label
-
-            # Define a helper function to help process X and Y values
-            def process_values(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise,
-                               vae,vae_name, latent_new=[], max_width=0, max_height=0, image_list=[], size_list=[]):
-
-                # Sample
-                samples = common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-                                          latent_image, denoise=denoise)
-
-                # Decode images and store
-                latent = samples[0]["samples"]
-
-                # Add the latent tensor to the tensors list
-                latent_new.append(latent)
-
-                # Load custom vae if available
-                if vae_name is not None:
-                    vae = load_vae(vae_name)
-
-                # Decode the image
-                image = vae.decode(latent).cpu()
-
-                # Convert the image from tensor to PIL Image and add it to the list
-                pil_image = tensor2pil(image)
-                image_list.append(pil_image)
-                size_list.append(pil_image.size)
-
-                # Update max dimensions
-                max_width = max(max_width, pil_image.width)
-                max_height = max(max_height, pil_image.height)
-
-                # Return the touched variables
-                return image_list, size_list, max_width, max_height, latent_new
-
-             # Initiate Plot label text variables X/Y_label
-            X_label = []
-            Y_label = []
-
-            # Seed_updated for "Seeds++ Batch" incremental seeds
-            seed_updated = seed
-
-            # Store the KSamplers original scheduler inside the same scheduler variable
-            scheduler = [scheduler, scheduler]
-
-            # By default set vae_name to None
-            vae_name = None
-
-            # Fill Plot Rows (X)
-            for X_index, X in enumerate(X_value):
-                # Seed control based on loop index during Batch
+                # Define X/Y_values for "Seeds++ Batch"
                 if X_type == "Seeds++ Batch":
-                    # Update seed based on the inner loop index
-                    seed_updated = seed + X_index
+                    X_value = [i for i in range(X_value[0])]
+                if Y_type == "Seeds++ Batch":
+                    Y_value = [i for i in range(Y_value[0])]
 
-                # Define X parameters and generate labels
-                steps, cfg, sampler_name, scheduler, latent_image, denoise, vae_name, X_label = \
-                    define_variable(X_type, X, seed_updated, steps, cfg, sampler_name, scheduler, latent_image,
-                                    denoise, vae_name, X_label, len(X_value))
+                # Embedd information into "Scheduler" X/Y_values for text label
+                if X_type == "Scheduler" and Y_type != "Sampler":
+                    # X_value second list value of each array entry = None
+                    for i in range(len(X_value)):
+                        if len(X_value[i]) == 2:
+                            X_value[i][1] = None
+                        else:
+                            X_value[i] = [X_value[i], None]
+                if Y_type == "Scheduler" and X_type != "Sampler":
+                    # Y_value second list value of each array entry = None
+                    for i in range(len(Y_value)):
+                        if len(Y_value[i]) == 2:
+                            Y_value[i][1] = None
+                        else:
+                            Y_value[i] = [Y_value[i], None]
 
-                if Y_type != "Nothing":
+                # Optimize image generation by prioritizing Checkpoint>LoRA>VAE as X in For Loop. Flip back when done.
+                if Y_type == "Checkpoint" or ( Y_type == "LoRA" and X_type != "Checkpoint") or  \
+                        (Y_type == "VAE" and (X_type != "Checkpoint" and X_type != "LoRA")):
+                    flip_xy = True
+                    X_type, Y_type = Y_type, X_type
+                    X_value, Y_value = Y_value, X_value
+                else:
+                    flip_xy = False
+
+                #_______________________________________________________________________________________________________
+                #The below code will clean from the cache any ckpt/vae/lora models it will not be reusing.
+
+                # Map the type names to the dictionaries
+                dict_map = {"VAE": [], "Checkpoint": [], "LoRA": []}
+
+                # Create a list of tuples with types and values
+                type_value_pairs = [(X_type, X_value), (Y_type, Y_value)]
+
+                # Iterate over type-value pairs
+                for t, v in type_value_pairs:
+                    if t in dict_map:
+                        dict_map[t] = v
+
+                ckpt_dict = [t[0] for t in dict_map.get("Checkpoint", [])] if dict_map.get("Checkpoint", []) else []
+
+                lora_dict = [t for t in dict_map.get("LoRA", [])] if dict_map.get("LoRA", []) else []
+
+                # If both ckpt_dict and lora_dict are not empty, manipulate lora_dict as described
+                if ckpt_dict and lora_dict:
+                    lora_dict = [(lora_name, ckpt, lora_model_wt, lora_clip_wt) for ckpt in ckpt_dict for
+                                 lora_name, lora_model_wt, lora_clip_wt in lora_dict]
+
+                # If lora_dict is not empty and ckpt_dict is empty, insert ckpt_name into each tuple in lora_dict
+                elif lora_dict:
+                    lora_dict = [(lora_name, ckpt_name, lora_model_wt, lora_clip_wt) for
+                                 lora_name, lora_model_wt, lora_clip_wt in
+                                 lora_dict]
+
+                vae_dict = dict_map.get("VAE", [])
+
+                # prioritize Caching Checkpoints over LoRAs but not both.
+                if X_type == "LoRA":
+                    ckpt_dict = []
+                if Y_type == "LoRA":  # This implies X_type == "Checkpoint"
+                    lora_dict = []
+
+                # Print dict_arrays for debugging
+                ###print(f"vae_dict={vae_dict}\nckpt_dict={ckpt_dict}\nlora_dict={lora_dict}")
+
+                # Clean values that won't be reused
+                clear_cache_by_exception(script_node_id, vae_dict=vae_dict, ckpt_dict=ckpt_dict, lora_dict=lora_dict)
+            
+                #_______________________________________________________________________________________________________
+                # Function that changes appropiate variables for next processed generations (also generates XY_labels)
+                def define_variable(var_type, var, seed, steps, cfg, sampler_name, scheduler, denoise, vae_name,
+                                    ckpt_name, clip_skip, lora_name, lora_model_wt, lora_clip_wt, var_label, num_label):
+
+                    # If var_type is "Seeds++ Batch", update var and seed, and generate labels
+                    if var_type == "Seeds++ Batch":
+                        text = f"Seed: {seed}"
+
+                    # If var_type is "Steps", update steps and generate labels
+                    elif var_type == "Steps":
+                        steps = var
+                        text = f"steps: {steps}"
+
+                    # If var_type is "CFG Scale", update cfg and generate labels
+                    elif var_type == "CFG Scale":
+                        cfg = var
+                        text = f"CFG: {round(cfg,2)}"
+
+                    # If var_type is "Sampler", update sampler_name, scheduler, and generate labels
+                    elif var_type == "Sampler":
+                        sampler_name = var[0]
+                        if var[1] == "":
+                            text = f"{sampler_name}"
+                        else:
+                            if var[1] != None:
+                                scheduler[0] = var[1]
+                            else:
+                                scheduler[0] = scheduler[1]
+                            text = f"{sampler_name} ({scheduler[0]})"
+                        text = text.replace("ancestral", "a").replace("uniform", "u")
+
+                    # If var_type is "Scheduler", update scheduler and generate labels
+                    elif var_type == "Scheduler":
+                        scheduler[0] = var[0]
+                        if len(var) == 2:
+                            text = f"{sampler_name} ({var[0]})"
+                        else:
+                            text = f"{var}"
+                        text = text.replace("ancestral", "a").replace("uniform", "u")
+
+                    # If var_type is "Denoise", update denoise and generate labels
+                    elif var_type == "Denoise":
+                        denoise = var
+                        text = f"denoise: {round(denoise, 2)}"
+
+                    # If var_type is "VAE", update vae_name and generate labels
+                    elif var_type == "VAE":
+                        vae_name = var
+                        vae_filename = os.path.basename(vae_name)
+                        text = f"VAE: {vae_filename}"
+
+                    # If var_type is "Checkpoint", update model and clip (if needed) and generate labels
+                    elif var_type == "Checkpoint":
+                        ckpt_name = var[0]
+                        clip_skip = var[1]
+                        ckpt_filename = os.path.basename(ckpt_name)
+                        text = f"{ckpt_filename}"
+                        #text = f"{ckpt_filename[:16]}... ({clip_skip})" if len(
+                            #ckpt_filename) > 16 else f"{ckpt_filename} ({clip_skip})"
+
+                    # If var_type is "LoRA", update lora_model and lora_clip (if needed) and generate labels
+                    elif var_type == "LoRA":
+                        lora_name = var[0]
+                        lora_model_wt = var[1]
+                        lora_clip_wt = var[2]
+                        lora_filename = os.path.basename(lora_name)
+                        text = f"<LoRA:{round(lora_model_wt, 2)}> {lora_filename}"
+
+                    # For any other var_type, set text to ""
+                    else:
+                        text = ""
+
+                    def truncate_texts(texts, num_label):
+                        min_length = min([len(text) for text in texts])
+                        truncate_length = min(min_length, 24)
+
+                        if truncate_length < 16:
+                            truncate_length = 16
+
+                        truncated_texts = []
+                        for text in texts:
+                            if len(text) > truncate_length:
+                                text = text[:truncate_length] + "..."
+                            truncated_texts.append(text)
+
+                        return truncated_texts
+
+                    # Add the generated text to var_label if it's not full
+                    if len(var_label) < num_label:
+                        var_label.append(text)
+
+                    # If var_type VAE , truncate entries in the var_label list when it's full
+                    if len(var_label) == num_label and (var_type == "VAE" or var_type == "Checkpoint" or var_type == "LoRA"):
+                        var_label = truncate_texts(var_label, num_label)
+
+                    # Return the modified variables
+                    return steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip,\
+                        lora_name, lora_model_wt, lora_clip_wt, var_label
+
+                # _______________________________________________________________________________________________________
+                # The function below is used to smartly load Checkpoint/LoRA/VAE models between generations.
+                def define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip, vae,
+                                 vae_name, ckpt_name, lora_name, lora_model_wt, lora_clip_wt, index, types, script_node_id, cache):
+        
+                    # Encode prompt and apply clip_skip. Return new conditioning.
+                    def encode_prompt(positive_prompt, negative_prompt, clip, clip_skip):
+                        clip = CLIPSetLastLayer().set_last_layer(clip, clip_skip)[0]
+                        return [[clip.encode(positive_prompt), {}]], [[clip.encode(negative_prompt), {}]]
+
+                    # Variable to track wether to encode prompt or not
+                    encode = False
+
+                    # Unpack types tuple
+                    X_type, Y_type = types
+
+                    # Load VAE if required
+                    if (X_type == "VAE" and index == 0) or Y_type == "VAE":
+                        vae = load_vae(vae_name, script_node_id, cache=cache[0])
+
+                    # Load Checkpoint if required. If Y_type is LoRA, required models will be loaded by load_lora func.
+                    if (X_type == "Checkpoint" and index == 0 and Y_type != "LoRA"):
+                        model, clip, _ = load_checkpoint(ckpt_name, script_node_id, False, cache=cache[1])
+                        encode = True
+
+                    # Load LoRA if required
+                    if (X_type == "LoRA" and index == 0) or Y_type == "LoRA":
+                        model, clip = load_lora(lora_name, ckpt_name, lora_model_wt, lora_clip_wt, script_node_id, cache=cache[2])
+                        encode = True
+
+                    # Encode prompt if needed
+                    if encode == True:
+                        positive, negative = encode_prompt(positive_prompt, negative_prompt, clip, clip_skip)
+                        
+                    return model, positive, negative, vae
+
+                # ______________________________________________________________________________________________________
+                # The below function is used to generate the results based on all the processed variables
+                def process_values(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
+                                   denoise, vae, latent_list=[], image_tensor_list=[], image_pil_list=[]):
+
+                    # Sample
+                    samples = common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
+                                              latent_image, denoise=denoise)
+
+                    # Decode images and store
+                    latent = samples[0]["samples"]
+
+                    # Add the latent tensor to the tensors list
+                    latent_list.append(latent)
+
+                    # Decode the latent tensor
+                    image = vae.decode(latent).cpu()
+
+                    # Add the resulting image tensor to image_tensor_list
+                    image_tensor_list.append(image)
+
+                    # Convert the image from tensor to PIL Image and add it to the image_pil_list
+                    image_pil_list.append(tensor2pil(image))
+
+                    # Return the touched variables
+                    return latent_list, image_tensor_list, image_pil_list
+
+                # ______________________________________________________________________________________________________
+                # The below section is the heart of the XY Plot image generation
+
+                 # Initiate Plot label text variables X/Y_label
+                X_label = []
+                Y_label = []
+
+                # Seed_updated for "Seeds++ Batch" incremental seeds
+                seed_updated = seed
+
+                # Store the KSamplers original scheduler inside the same scheduler variable
+                scheduler = [scheduler, scheduler]
+
+                # Store types in a Tuple for easy function passing
+                types = (X_type, Y_type)
+
+                # Fill Plot Rows (X)
+                for X_index, X in enumerate(X_value):
+
                     # Seed control based on loop index during Batch
-                    for Y_index, Y in enumerate(Y_value):
-                        if Y_type == "Seeds++ Batch":
-                            # Update seed based on the inner loop index
-                            seed_updated = seed + Y_index
+                    if X_type == "Seeds++ Batch":
+                        # Update seed based on the inner loop index
+                        seed_updated = seed + X_index
 
-                        # Define Y parameters and generate labels
-                        steps, cfg, sampler_name, scheduler, latent_image, denoise, vae_name, Y_label = \
-                            define_variable(Y_type, Y, seed_updated, steps, cfg, sampler_name, scheduler, latent_image,
-                                            denoise, vae_name, Y_label, len(Y_value))
+                    # Define X parameters and generate labels
+                    steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip,\
+                        lora_name, lora_model_wt, lora_clip_wt, X_label = \
+                        define_variable(X_type, X, seed_updated, steps, cfg, sampler_name, scheduler, denoise, vae_name,
+                                        ckpt_name, clip_skip, lora_name, lora_model_wt, lora_clip_wt, X_label, len(X_value))
 
-                        # Generate images
-                        image_list, size_list, max_width, max_height, latent_new = \
+                    if X_type != "Nothing" and Y_type == "Nothing":
+
+                        # Models & Conditionings
+                        model, positive, negative , vae = \
+                            define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip, vae,
+                                         vae_name, ckpt_name, lora_name, lora_model_wt, lora_clip_wt, 0, types, script_node_id, cache)
+
+                        # Generate Results
+                        latent_list, image_tensor_list, image_pil_list = \
                             process_values(model, seed_updated, steps, cfg, sampler_name, scheduler[0],
-                                           positive, negative, latent_image, denoise, vae, vae_name)
+                                           positive, negative, latent_image, denoise, vae)
+
+                    elif X_type != "Nothing" and Y_type != "Nothing":
+                        # Seed control based on loop index during Batch
+                        for Y_index, Y in enumerate(Y_value):
+
+                            if Y_type == "Seeds++ Batch":
+                                # Update seed based on the inner loop index
+                                seed_updated = seed + Y_index
+
+                            # Define Y parameters and generate labels
+                            steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, \
+                                lora_name, lora_model_wt, lora_clip_wt, Y_label = \
+                                define_variable(Y_type, Y, seed_updated, steps, cfg, sampler_name, scheduler, denoise, vae_name,
+                                                ckpt_name, clip_skip, lora_name, lora_model_wt, lora_clip_wt, Y_label, len(Y_value))
+
+                            # Models & Conditionings
+                            model, positive, negative, vae = \
+                            define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip, vae,
+                                         vae_name, ckpt_name, lora_name, lora_model_wt, lora_clip_wt, Y_index, types, script_node_id, cache)
+
+                            # Generate Results
+                            latent_list, image_tensor_list, image_pil_list = \
+                                process_values(model, seed_updated, steps, cfg, sampler_name, scheduler[0],
+                                               positive, negative, latent_image, denoise, vae)
+
+                # Clean up cache
+                if cache_models == "False":
+                    clear_cache_by_exception(script_node_id, vae_dict=[], ckpt_dict=[], lora_dict=[])
+                #
                 else:
-                    # Generate images
-                    image_list, size_list, max_width, max_height, latent_new = \
-                        process_values(model, seed_updated, steps, cfg, sampler_name, scheduler[0],
-                                       positive, negative, latent_image, denoise, vae, vae_name)
+                    # Prioritrize Caching Checkpoints over LoRAs.
+                    if X_type == "LoRA":
+                        clear_cache_by_exception(script_node_id, ckpt_dict=[])
+                    if Y_type == "LoRA":  # This implies X_type == "Checkpoint"
+                        clear_cache_by_exception(script_node_id, lora_dict=[])
 
+                # ______________________________________________________________________________________________________
+                def print_plot_variables(X_type, Y_type, X_value, Y_value, seed, ckpt_name, lora_name, vae_name,
+                                         clip_skip, steps, cfg, sampler_name, scheduler, denoise, latent_height, latent_width):
+                    #print("\n" + "-" * 40)  # Print an empty line followed by a separator line
+                    print("-" * 40)  # Print an empty line followed by a separator line
+                    print("\033[32mXY Plot Settings:\033[0m")
+                    print("- " * 20)  # Print an empty line followed by a separator line
 
-            def adjusted_font_size(text, initial_font_size, max_width):
-                font = ImageFont.truetype(str(Path(font_path)), initial_font_size)
-                text_width, _ = font.getsize(text)
+                    if X_type == "Checkpoint" or Y_type == "Checkpoint":
+                        ckpt_name = ", ".join([str(x[0]) for x in X_value]) if X_type == "Checkpoint" else ckpt_name
+                        clip_skip = ", ".join([str(x[1]) for x in X_value]) if X_type == "Checkpoint" else clip_skip
 
-                if text_width > (max_width * 0.9):
-                    scaling_factor = 0.9  # A value less than 1 to shrink the font size more aggressively
-                    new_font_size = int(initial_font_size * (max_width / text_width) * scaling_factor)
+                    lora_name = ", ".join([str(x[0]) for x in X_value]) if X_type == "LoRA" else ", ".join(
+                        [str(y[0]) for y in Y_value]) if Y_type == "LoRA" else lora_name
+
+                    vae_name = ", ".join(X_value) if X_type == "VAE" else vae_name
+                    ckpt_name = ", ".join(Y_value) if Y_type == "VAE" else ckpt_name
+
+                    seed_list = [seed + x for x in X_value] if X_type == "Seeds++ Batch" else [seed + y for y in
+                                                                                               Y_value] if Y_type == "Seeds++ Batch" else [
+                        seed]
+                    seed = ", ".join(map(str, seed_list))
+
+                    steps = ", ".join(map(str, X_value)) if X_type == "Steps" else ", ".join(
+                        map(str, Y_value)) if Y_type == "Steps" else steps
+
+                    cfg = ", ".join(map(str, X_value)) if X_type == "CFG Scale" else ", ".join(
+                        map(str, Y_value)) if Y_type == "CFG Scale" else cfg
+
+                    if X_type == "Sampler" or Y_type == "Sampler":
+                        sampler_name = ", ".join([str(x[0]) for x in X_value]) if X_type == "Sampler" else sampler_name
+                        scheduler = ", ".join([str(x[1]) for x in X_value]) if X_type == "Sampler" else scheduler
+
+                    scheduler = ", ".join([str(x[0]) for x in X_value]) if X_type == "Scheduler" else ", ".join(
+                        [str(y[0]) for y in Y_value]) if Y_type == "Scheduler" else scheduler
+
+                    denoise = ", ".join(map(str, X_value)) if X_type == "Denoise" else ", ".join(
+                        map(str, Y_value)) if Y_type == "Denoise" else denoise
+
+                    print(f"img_count: {len(X_value)*len(Y_value)}")
+                    print(f"dim: {latent_height} x {latent_width}")
+                    print(f"ckpt_name: {ckpt_name if ckpt_name is not None else '?'}")
+                    print(f"lora_name: {lora_name}")
+                    print(f"vae_name: {vae_name if vae_name is not None else '?'}")
+                    print(f"clip_skip: {clip_skip if clip_skip is not None else '?'}")
+                    print(f"seed: {seed}")
+                    print(f"steps: {steps}")
+                    print(f"cfg: {cfg}")
+                    print(f"sampler_name: {sampler_name}")
+                    print(f"scheduler: {scheduler}")
+                    print(f"denoise: {denoise}")
+
+                print_plot_variables(X_type, Y_type, X_value, Y_value, seed, ckpt_name, lora_name, vae_name, clip_skip,
+                                     steps, cfg, sampler_name, scheduler[0], denoise, latent_height, latent_width)
+
+                # ______________________________________________________________________________________________________
+                def adjusted_font_size(text, initial_font_size, latent_width):
+                    font = ImageFont.truetype(str(Path(font_path)), initial_font_size)
+                    text_width, _ = font.getsize(text)
+
+                    if text_width > (latent_width * 0.9):
+                        scaling_factor = 0.9  # A value less than 1 to shrink the font size more aggressively
+                        new_font_size = int(initial_font_size * (latent_width / text_width) * scaling_factor)
+                    else:
+                        new_font_size = initial_font_size
+
+                    return new_font_size
+
+                # ______________________________________________________________________________________________________
+                
+                # Disable vae decode on next Hold
+                update_value_by_id("vae_decode", my_unique_id, False)
+
+                # Flip X & Y results back if flipped earlier (for Checkpoint/LoRA For loop optimizations)
+                if flip_xy == True:
+                    X_type, Y_type = Y_type, X_type
+                    X_value, Y_value = Y_value, X_value
+                    X_label, Y_label = Y_label, X_label
+
+                # Extract plot dimensions
+                num_rows = max(len(Y_value) if Y_value is not None else 0, 1)
+                num_cols = max(len(X_value) if X_value is not None else 0, 1)
+
+                def rearrange_list_A(arr, num_cols, num_rows):
+                    new_list = []
+                    for i in range(num_rows):
+                        for j in range(num_cols):
+                            index = j * num_rows + i
+                            new_list.append(arr[index])
+                    return new_list
+
+                def rearrange_list_B(arr, num_rows, num_cols):
+                    new_list = []
+                    for i in range(num_rows):
+                        for j in range(num_cols):
+                            index = i * num_cols + j
+                            new_list.append(arr[index])
+                    return new_list
+
+                # Rearrange lists for proper display
+                if flip_xy == False:
+                    latent_list = rearrange_list_A(latent_list, num_cols, num_rows)
                 else:
-                    new_font_size = initial_font_size
+                    latent_list = rearrange_list_B(latent_list, num_cols, num_rows)
+                    image_pil_list = rearrange_list_A(image_pil_list, num_rows, num_cols)
 
-                return new_font_size
+                # Concatenate the tensors along the first dimension (dim=0)
+                latent_list = torch.cat(latent_list, dim=0)
 
-            # Disable vae decode on next Hold
-            update_value_by_id("vae_decode", my_unique_id, False)
+                # Store latent_list as last latent
+                update_value_by_id("latent", my_unique_id, latent_list)
 
-            # Extract plot dimensions
-            num_rows = max(len(Y_value) if Y_value is not None else 0, 1)
-            num_cols = max(len(X_value) if X_value is not None else 0, 1)
+                # Calculate the dimensions of the white background image
+                border_size_top = latent_width // 15
 
-            def rearrange_tensors(latent, num_cols, num_rows):
-                new_latent = []
-                for i in range(num_rows):
-                    for j in range(num_cols):
-                        index = j * num_rows + i
-                        new_latent.append(latent[index])
-                return new_latent
+                # Longest Y-label length
+                if len(Y_label) > 0:
+                    Y_label_longest = max(len(s) for s in Y_label)
+                else:
+                    # Handle the case when the sequence is empty
+                    Y_label_longest = 0  # or any other appropriate value
 
-            # Rearrange latent array to match preview image grid
-            latent_new = rearrange_tensors(latent_new, num_cols, num_rows)
+                Y_label_scale = min(Y_label_longest + 4,24) / 24
 
-            # Concatenate the tensors along the first dimension (dim=0)
-            latent_new = torch.cat(latent_new, dim=0)
+                if Y_label_orientation == "Vertical":
+                    border_size_left = border_size_top
+                else:  # Assuming Y_label_orientation is "Horizontal"
+                    # border_size_left is now min(latent_width, latent_height) plus 20% of the difference between the two
+                    border_size_left = min(latent_width, latent_height) + int(0.2 * abs(latent_width - latent_height))
+                    border_size_left = int(border_size_left * Y_label_scale)
 
-            # Store latent_new as last latent
-            update_value_by_id("latent", my_unique_id, latent_new)
+                # Modify the border size, background width and x_offset initialization based on Y_type and Y_label_orientation
+                if Y_type == "Nothing":
+                    bg_width = num_cols * latent_width + (num_cols - 1) * grid_spacing
+                    x_offset_initial = 0
+                else:
+                    if Y_label_orientation == "Vertical":
+                        bg_width = num_cols * latent_width + (num_cols - 1) * grid_spacing + 3 * border_size_left
+                        x_offset_initial = border_size_left * 3
+                    else:  # Assuming Y_label_orientation is "Horizontal"
+                        bg_width = num_cols * latent_width + (num_cols - 1) * grid_spacing + border_size_left
+                        x_offset_initial = border_size_left
 
-            # Calculate the dimensions of the white background image
-            border_size = max_width // 15
+                # Modify the background height based on X_type
+                if X_type == "Nothing":
+                    bg_height = num_rows * latent_height + (num_rows - 1) * grid_spacing
+                    y_offset = 0
+                else:
+                    bg_height = num_rows * latent_height + (num_rows - 1) * grid_spacing + 3 * border_size_top
+                    y_offset = border_size_top * 3
 
-            # Modify the background width and x_offset initialization based on Y_type
-            if Y_type == "Nothing":
-                bg_width = num_cols * max_width + (num_cols - 1) * grid_spacing
-                x_offset_initial = 0
-            else:
-                bg_width = num_cols * max_width + (num_cols - 1) * grid_spacing + 3 * border_size
-                x_offset_initial = border_size * 3
+                # Create the white background image
+                background = Image.new('RGBA', (int(bg_width), int(bg_height)), color=(255, 255, 255, 255))
 
-            # Modify the background height based on X_type
-            if X_type == "Nothing":
-                bg_height = num_rows * max_height + (num_rows - 1) * grid_spacing
-                y_offset = 0
-            else:
-                bg_height = num_rows * max_height + (num_rows - 1) * grid_spacing + 3 * border_size
-                y_offset = border_size * 3
+                for row in range(num_rows):
 
-            # Create the white background image
-            background = Image.new('RGBA', (int(bg_width), int(bg_height)), color=(255, 255, 255, 255))
+                    # Initialize the X_offset
+                    x_offset = x_offset_initial
 
-            for row in range(num_rows):
+                    for col in range(num_cols):
+                        # Calculate the index for image_pil_list
+                        index = col * num_rows + row
+                        img = image_pil_list[index]
 
-                # Initialize the X_offset
-                x_offset = x_offset_initial
+                        # Paste the image
+                        background.paste(img, (x_offset, y_offset))
 
-                for col in range(num_cols):
-                    # Calculate the index for image_list
-                    index = col * num_rows + row
-                    img = image_list[index]
+                        if row == 0 and X_type != "Nothing":
+                            # Assign text
+                            text = X_label[col]
 
-                    # Paste the image
-                    background.paste(img, (x_offset, y_offset))
+                            # Add the corresponding X_value as a label above the image
+                            initial_font_size = int(48 * img.width / 512)
+                            font_size = adjusted_font_size(text, initial_font_size, img.width)
+                            label_height = int(font_size*1.5)
 
-                    if row == 0 and X_type != "Nothing":
-                        # Assign text
-                        text = X_label[col]
+                            # Create a white background label image
+                            label_bg = Image.new('RGBA', (img.width, label_height), color=(255, 255, 255, 0))
+                            d = ImageDraw.Draw(label_bg)
 
-                        # Add the corresponding X_value as a label above the image
-                        initial_font_size = int(48 * img.width / 512)
-                        font_size = adjusted_font_size(text, initial_font_size, img.width)
-                        label_height = int(font_size*1.5)
+                            # Create the font object
+                            font = ImageFont.truetype(str(Path(font_path)), font_size)
 
-                        # Create a white background label image
-                        label_bg = Image.new('RGBA', (img.width, label_height), color=(255, 255, 255, 0))
-                        d = ImageDraw.Draw(label_bg)
+                            # Calculate the text size and the starting position
+                            text_width, text_height = d.textsize(text, font=font)
+                            text_x = (img.width - text_width) // 2
+                            text_y = (label_height - text_height) // 2
 
-                        # Create the font object
-                        font = ImageFont.truetype(str(Path(font_path)), font_size)
+                            # Add the text to the label image
+                            d.text((text_x, text_y), text, fill='black', font=font)
 
-                        # Calculate the text size and the starting position
-                        text_width, text_height = d.textsize(text, font=font)
-                        text_x = (img.width - text_width) // 2
-                        text_y = (label_height - text_height) // 2
+                            # Calculate the available space between the top of the background and the top of the image
+                            available_space = y_offset - label_height
 
-                        # Add the text to the label image
-                        d.text((text_x, text_y), text, fill='black', font=font)
+                            # Calculate the new Y position for the label image
+                            label_y = available_space // 2
 
-                        # Calculate the available space between the top of the background and the top of the image
-                        available_space = y_offset - label_height
+                            # Paste the label image above the image on the background using alpha_composite()
+                            background.alpha_composite(label_bg, (x_offset, label_y))
 
-                        # Calculate the new Y position for the label image
-                        label_y = available_space // 2
+                        if col == 0 and Y_type != "Nothing":
+                            # Assign text
+                            text = Y_label[row]
 
-                        # Paste the label image above the image on the background using alpha_composite()
-                        background.alpha_composite(label_bg, (x_offset, label_y))
+                            # Add the corresponding Y_value as a label to the left of the image
+                            if Y_label_orientation == "Vertical":
+                                initial_font_size = int(48 * latent_width / 512)  # Adjusting this to be same as X_label size
+                                font_size = adjusted_font_size(text, initial_font_size, latent_width)
+                            else:  # Assuming Y_label_orientation is "Horizontal"
+                                initial_font_size = int(48 *  (border_size_left/Y_label_scale) / 512)  # Adjusting this to be same as X_label size
+                                font_size = adjusted_font_size(text, initial_font_size,  int(border_size_left/Y_label_scale))
 
-                    if col == 0 and Y_type != "Nothing":
-                        # Assign text
-                        text = Y_label[row]
+                            # Create a white background label image
+                            label_bg = Image.new('RGBA', (img.height, font_size), color=(255, 255, 255, 0))
+                            d = ImageDraw.Draw(label_bg)
 
-                        # Add the corresponding Y_value as a label to the left of the image
-                        initial_font_size = int(48 * img.height / 512)
-                        font_size = adjusted_font_size(text, initial_font_size, img.height)
+                            # Create the font object
+                            font = ImageFont.truetype(str(Path(font_path)), font_size)
 
-                        # Create a white background label image
-                        label_bg = Image.new('RGBA', (img.height, font_size), color=(255, 255, 255, 0))
-                        d = ImageDraw.Draw(label_bg)
+                            # Calculate the text size and the starting position
+                            text_width, text_height = d.textsize(text, font=font)
+                            text_x = (img.height - text_width) // 2
+                            text_y = (font_size - text_height) // 2
 
-                        # Create the font object
-                        font = ImageFont.truetype(str(Path(font_path)), font_size)
+                            # Add the text to the label image
+                            d.text((text_x, text_y), text, fill='black', font=font)
 
-                        # Calculate the text size and the starting position
-                        text_width, text_height = d.textsize(text, font=font)
-                        text_x = (img.height - text_width) // 2
-                        text_y = (font_size - text_height) // 2
+                            # Rotate the label_bg 90 degrees counter-clockwise only if Y_label_orientation is "Vertical"
+                            if Y_label_orientation == "Vertical":
+                                label_bg = label_bg.rotate(90, expand=True)
 
-                        # Add the text to the label image
-                        d.text((text_x, text_y), text, fill='black', font=font)
+                            # Calculate the available space between the left of the background and the left of the image
+                            available_space = x_offset - label_bg.width
 
-                        # Rotate the label_bg 90 degrees counter-clockwise
-                        if Y_type != "Latent Batch":
-                            label_bg = label_bg.rotate(90, expand=True)
+                            # Calculate the new X position for the label image
+                            label_x = available_space // 2
 
-                        # Calculate the available space between the left of the background and the left of the image
-                        available_space = x_offset - label_bg.width
+                            # Calculate the Y position for the label image based on its orientation
+                            if Y_label_orientation == "Vertical":
+                                label_y = y_offset + (img.height - label_bg.height) // 2
+                            else:  # Assuming Y_label_orientation is "Horizontal"
+                                label_y = y_offset + img.height - (img.height - label_bg.height) // 2
 
-                        # Calculate the new X position for the label image
-                        label_x = available_space // 2
+                            # Paste the label image to the left of the image on the background using alpha_composite()
+                            background.alpha_composite(label_bg, (label_x, label_y))
 
-                        # Calculate the Y position for the label image
-                        label_y = y_offset + (img.height - label_bg.height) // 2
+                        # Update the x_offset
+                        x_offset += img.width + grid_spacing
 
-                        # Paste the label image to the left of the image on the background using alpha_composite()
-                        background.alpha_composite(label_bg, (label_x, label_y))
+                    # Update the y_offset
+                    y_offset += img.height + grid_spacing
 
-                    # Update the x_offset
-                    x_offset += img.width + grid_spacing
-
-                # Update the y_offset
-                y_offset += img.height + grid_spacing
-
-            images = pil2tensor(background)
-            update_value_by_id("images", my_unique_id, images)
+                images = pil2tensor(background)
 
             # Generate image results and store
             results = preview_images(images, filename_prefix)
             update_value_by_id("results", my_unique_id, results)
 
-            # Clean loaded_objects
-            update_loaded_objects(prompt)
+            # Squeeze and Stack the tensors, and store results
+            image_tensor_list = torch.stack([tensor.squeeze() for tensor in image_tensor_list])
+            update_value_by_id("images", my_unique_id, image_tensor_list)
+
+            # Print cache if set to true
+            if cache_models == "True":
+                print_loaded_objects_entries(script_node_id, prompt)
+
+            print("\n" + "-" * 40)  # Print an empty line followed by a separator line
 
             # Output image results to ui and node outputs
-            return {"ui": {"images": results}, "result": (model, positive, negative, {"samples": latent_new}, vae, images,)}
+            return {"ui": {"images": results}, "result": (model, positive, negative, {"samples": latent_list}, vae, image_tensor_list,)}
 
-
+########################################################################################################################
 # TSC XY Plot
 class TSC_XYplot:
-    examples = "(X/Y_types)     (X/Y_values)\n" \
-               "Latent Batch    n/a\n" \
-               "Seeds++ Batch   3\n" \
-               "Steps           15;20;25\n" \
-               "CFG Scale       5;10;15;20\n" \
-               "Sampler(1)      dpmpp_2s_ancestral;euler;ddim\n" \
-               "Sampler(2)      dpmpp_2m,karras;heun,normal\n" \
-               "Scheduler       normal;simple;karras\n" \
-               "Denoise         .3;.4;.5;.6;.7\n" \
-               "VAE             vae_1; vae_2; vae_3"
-
-    samplers = ";\n".join(comfy.samplers.KSampler.SAMPLERS)
-    schedulers = ";\n".join(comfy.samplers.KSampler.SCHEDULERS)
-    vaes = ";\n".join(folder_paths.get_filename_list("vae"))
-    notes = "- During a 'Latent Batch', the corresponding X/Y_value is ignored.\n" \
-            "- During a 'Latent Batch', the latent_id is ignored.\n" \
-            "- For a 'Seeds++ Batch', starting seed is defined by the KSampler.\n" \
-            "- Trailing semicolons are ignored in the X/Y_values.\n" \
-            "- Parameter types not set by this node are defined in the KSampler."
 
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-                    "X_type": (["Nothing", "Latent Batch", "Seeds++ Batch", "Steps", "CFG Scale",
-                                "Sampler", "Scheduler", "Denoise", "VAE"],),
-                    "X_value": ("STRING", {"default": "", "multiline": False}),
-                    "Y_type": (["Nothing", "Latent Batch", "Seeds++ Batch", "Steps", "CFG Scale",
-                                "Sampler", "Scheduler", "Denoise", "VAE"],),
-                    "Y_value": ("STRING", {"default": "", "multiline": False}),
                     "grid_spacing": ("INT", {"default": 0, "min": 0, "max": 500, "step": 5}),
                     "XY_flip": (["False","True"],),
-                    "latent_id": ("INT", {"default": 0, "min": 0, "max": 100}),
-                    "help": ("STRING", {"default":
-                                        f"____________EXAMPLES____________\n{cls.examples}\n\n"
-                                        f"____________SAMPLERS____________\n{cls.samplers}\n\n"
-                                        f"___________SCHEDULERS___________\n{cls.schedulers}\n\n"
-                                        f"______________VAE_______________\n{cls.vaes}\n\n"
-                                        f"_____________NOTES______________\n{cls.notes}",
-                                        "multiline": True}),},
-                }
+                    "Y_label_orientation": (["Horizontal", "Vertical"],),
+                    "cache_models": (["True", "False"],),},
+                "optional": {"dependencies": ("DEPENDENCIES", ),
+                             "X": ("XY", ),
+                             "Y": ("XY", ),},
+            "hidden": {"my_unique_id": "UNIQUE_ID",},}
     RETURN_TYPES = ("SCRIPT",)
-    RETURN_NAMES = ("script",)
+    RETURN_NAMES = ("SCRIPT",)
     FUNCTION = "XYplot"
-    CATEGORY = "Efficiency Nodes/Scripts"
+    CATEGORY = "Efficiency Nodes/XY Plot"
 
-    def XYplot(self, X_type, X_value, Y_type, Y_value, grid_spacing, XY_flip, latent_id, help):
+    def XYplot(self, grid_spacing, XY_flip, Y_label_orientation,
+               cache_models, dependencies=None, X=None, Y=None, my_unique_id=None):
 
-        # Store values as arrays
-        X_value = X_value.replace(" ", "").replace("\n", "")  # Remove spaces and newline characters
-        X_value = X_value.rstrip(";")  # Remove trailing semicolon
-        X_value = X_value.split(";")  # Turn to array
-
-        Y_value = Y_value.replace(" ", "").replace("\n", "")  # Remove spaces and newline characters
-        Y_value = Y_value.rstrip(";")  # Remove trailing semicolon
-        Y_value = Y_value.split(";")  # Turn to array
-
-        # Define the valid bounds for each type
-        bounds = {
-            "Seeds++ Batch": {"min": 0, "max": 50},
-            "Steps": {"min": 0},
-            "CFG Scale": {"min": 0, "max": 100},
-            "Sampler": {"options": comfy.samplers.KSampler.SAMPLERS},
-            "Scheduler": {"options": comfy.samplers.KSampler.SCHEDULERS},
-            "Denoise": {"min": 0, "max": 1},
-            "VAE": {"options": folder_paths.get_filename_list("vae")}
-        }
-
-        def validate_value(value, value_type, bounds):
-            """
-            Validates a value based on its corresponding value_type and bounds.
-
-            Parameters:
-                value (str or int or float): The value to validate.
-                value_type (str): The type of the value, which determines the valid bounds.
-                bounds (dict): A dictionary that contains the valid bounds for each value_type.
-
-            Returns:
-                The validated value.
-                None if no validation was done or failed.
-            """
-
-            # Seeds++ Batch
-            if value_type == "Seeds++ Batch":
-                try:
-                    x = float(value)
-                except ValueError:
-                    print(
-                        f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid batch count.")
-                    return None
-
-                if not x.is_integer():
-                    print(
-                        f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid batch count.")
-                    return None
-                else:
-                    x = int(x)
-
-                if x < bounds["Seeds++ Batch"]["min"]:
-                    x = bounds["Seeds++ Batch"]["min"]
-                elif x > bounds["Seeds++ Batch"]["max"]:
-                    x = bounds["Seeds++ Batch"]["max"]
-
-                return x
-            # Steps
-            elif value_type == "Steps":
-                try:
-                    x = int(value)
-                    if x < bounds["Steps"]["min"]:
-                        x = bounds["Steps"]["min"]
-                    return x
-                except ValueError:
-                    print(
-                        f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid Step count.")
-                    return None
-            # CFG Scale
-            elif value_type == "CFG Scale":
-                try:
-                    x = float(value)
-                    if x < bounds["CFG Scale"]["min"]:
-                        x = bounds["CFG Scale"]["min"]
-                    elif x > bounds["CFG Scale"]["max"]:
-                        x = bounds["CFG Scale"]["max"]
-                    return x
-                except ValueError:
-                    print(
-                        f"\033[31mXY Plot Error:\033[0m '{value}' is not a number between {bounds['CFG Scale']['min']}"
-                        f" and {bounds['CFG Scale']['max']} for CFG Scale.")
-                    return None
-            # Sampler
-            elif value_type == "Sampler":
-                if isinstance(value, str) and ',' in value:
-                    value = tuple(map(str.strip, value.split(',')))
-
-                if isinstance(value, tuple):
-                    if len(value) == 2:
-                        sampler, scheduler = value
-                        scheduler = scheduler.lower()  # Convert the scheduler name to lowercase
-                        if sampler not in bounds["Sampler"]["options"]:
-                            valid_samplers = '\n'.join(bounds["Sampler"]["options"])
-                            print(
-                                f"\033[31mXY Plot Error:\033[0m '{sampler}' is not a valid sampler. Valid samplers are:\n{valid_samplers}")
-                            sampler = None
-                        if scheduler not in bounds["Scheduler"]["options"]:
-                            valid_schedulers = '\n'.join(bounds["Scheduler"]["options"])
-                            print(
-                                f"\033[31mXY Plot Error:\033[0m '{scheduler}' is not a valid scheduler. Valid schedulers are:\n{valid_schedulers}")
-                            scheduler = None
-                        if sampler is None or scheduler is None:
-                            return None
-                        else:
-                            return sampler, scheduler
-                    else:
-                        print(
-                            f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid sampler.'")
-                        return None
-                else:
-                    if value not in bounds["Sampler"]["options"]:
-                        valid_samplers = '\n'.join(bounds["Sampler"]["options"])
-                        print(
-                            f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid sampler. Valid samplers are:\n{valid_samplers}")
-                        return None
-                    else:
-                        return value, None
-            # Scheduler
-            elif value_type == "Scheduler":
-                if value not in bounds["Scheduler"]["options"]:
-                    valid_schedulers = '\n'.join(bounds["Scheduler"]["options"])
-                    print(
-                        f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid Scheduler. Valid Schedulers are:\n{valid_schedulers}")
-                    return None
-                else:
-                    return value
-            # Denoise
-            elif value_type == "Denoise":
-                try:
-                    x = float(value)
-                    if x < bounds["Denoise"]["min"]:
-                        x = bounds["Denoise"]["min"]
-                    elif x > bounds["Denoise"]["max"]:
-                        x = bounds["Denoise"]["max"]
-                    return x
-                except ValueError:
-                    print(
-                        f"\033[31mXY Plot Error:\033[0m '{value}' is not a number between {bounds['Denoise']['min']} "
-                        f"and {bounds['Denoise']['max']} for Denoise.")
-                    return None
-            # VAE
-            elif value_type == "VAE":
-                if value not in bounds["VAE"]["options"]:
-                    valid_vaes = '\n'.join(bounds["VAE"]["options"])
-                    print(
-                        f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid VAE. Valid VAEs are:\n{valid_vaes}")
-                    return None
-                else:
-                    return value
-            else:
-                return None
-
-        def reset_variables():
+        # Unpack X & Y Tuples if connected
+        if X is not None:
+            X_type, X_value  = X
+        else:
             X_type = "Nothing"
-            X_value = [None]
+            X_value = [""]
+        if Y is not None:
+            Y_type, Y_value = Y
+        else:
             Y_type = "Nothing"
-            Y_value = [None]
-            latent_id = None
-            grid_spacing = None
-            return X_type, X_value, Y_type, Y_value, grid_spacing, latent_id
+            Y_value = [""]
 
-        if X_type == Y_type == "Nothing":
-            return (reset_variables(),)
+        # Nothing is connected or Error
+        if X == Y == None or X_type == "Error" or Y_type == "Error":
+            return (None,)
 
         # If types are the same, error and return
         if (X_type == Y_type) and (X_type != "Nothing"):
-            print(f"\033[31mXY Plot Error:\033[0m X_type and Y_type must be different.")
-            # Reset variables to default values and return
-            return (reset_variables(),)
+            print(f"\033[31mXY Plot Error:\033[0m X and Y must be different.")
+            # Return None
+            return (None,)
 
-        # Validate X_value array length is 1 if doing a "Seeds++ Batch"
-        if len(X_value) != 1 and X_type == "Seeds++ Batch":
-            print(f"\033[31mXY Plot Error:\033[0m '{';'.join(X_value)}' is not a valid batch count.")
-            return (reset_variables(),)
-
-        # Validate Y_value array length is 1 if doing a "Seeds++ Batch"
-        if len(Y_value) != 1 and Y_type == "Seeds++ Batch":
-            print(f"\033[31mXY Plot Error:\033[0m '{';'.join(Y_value)}' is not a valid batch count.")
-            return (reset_variables(),)
-
-        # Loop over each entry in X_value and check if it's valid
-        # Validate X_value based on X_type
-        if X_type != "Nothing" and X_type != "Latent Batch":
-            for i in range(len(X_value)):
-                X_value[i] = validate_value(X_value[i], X_type, bounds)
-                if X_value[i] == None:
-                    # Reset variables to default values and return
-                    return (reset_variables(),)
-
-        # Loop over each entry in Y_value and check if it's valid
-        # Validate Y_value based on Y_type
-        if Y_type != "Nothing" and Y_type != "Latent Batch":
-            for i in range(len(Y_value)):
-                Y_value[i] = validate_value(Y_value[i], Y_type, bounds)
-                if Y_value[i] == None:
-                    # Reset variables to default values and return
-                    return (reset_variables(),)
+        # Check that dependencies is connected for Checkpoint and LoRA plots
+        if X_type == "Checkpoint" or Y_type == "Checkpoint" or  X_type == "LoRA" or Y_type == "LoRA":
+            if dependencies == None: # Not connected
+                print(f"\033[31mXY Plot Error:\033[0m The dependencies input must be connected for Checkpoint/LoRA plots.")
+                # Return None
+                return (None,)
 
         # Clean Schedulers from Sampler data (if other type is Scheduler)
         if X_type == "Sampler" and Y_type == "Scheduler":
@@ -1123,26 +1386,362 @@ class TSC_XYplot:
             # Clear Y_value Scheduler's
             Y_value = [[y[0], ""] for y in Y_value]
 
-        # Clean X/Y_values
-        if X_type == "Nothing" or X_type == "Latent Batch":
-            X_value = [None]
-        if Y_type == "Nothing" or Y_type == "Latent Batch":
-            Y_value = [None]
-
         # Flip X and Y
         if XY_flip == "True":
             X_type, Y_type = Y_type, X_type
             X_value, Y_value = Y_value, X_value
 
-        # Print the validated values
-        if X_type != "Nothing" and X_type != "Latent Batch":
-            print("\033[90m" + f"XY Plot validated values for X_type '{X_type}': {', '.join(map(str, X_value))}\033[0m")
-        if Y_type != "Nothing" and Y_type != "Latent Batch":
-            print("\033[90m" + f"XY Plot validated values for Y_type '{Y_type}': {', '.join(map(str, Y_value))}\033[0m")
 
-        return ((X_type, X_value, Y_type, Y_value, grid_spacing, latent_id),)
+        return ((X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models, dependencies),)
 
 
+# TSC XY Plot: Seeds Values
+class TSC_XYplot_SeedsBatch:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "batch_count": ("INT", {"default": 1, "min": 0, "max": 50}),},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, batch_count):
+        if batch_count == 0:
+            return (None,)
+        xy_type = "Seeds++ Batch"
+        xy_value = [batch_count]
+        return ((xy_type, xy_value),)
+
+# TSC XY Plot: Step Values
+class TSC_XYplot_Steps:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "selection_count": ("INT", {"default": 0, "min": 0, "max": 5}),
+            "steps_1": ("INT", {"default": 20, "min": 1, "max": 10000}),
+            "steps_2": ("INT", {"default": 20, "min": 1, "max": 10000}),
+            "steps_3": ("INT", {"default": 20, "min": 1, "max": 10000}),
+            "steps_4": ("INT", {"default": 20, "min": 1, "max": 10000}),
+            "steps_5": ("INT", {"default": 20, "min": 1, "max": 10000}),},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, selection_count, steps_1, steps_2, steps_3, steps_4, steps_5):
+        xy_type = "Steps"
+        xy_value = [step for idx, step in enumerate([steps_1, steps_2, steps_3, steps_4, steps_5], start=1) if
+                 idx <= selection_count]
+        if not xy_value:  # Check if the list is empty
+            return (None,)
+        return ((xy_type, xy_value),)
+
+
+# TSC XY Plot: CFG Values
+class TSC_XYplot_CFG:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "selection_count": ("INT", {"default": 0, "min": 0, "max": 5}),
+            "cfg_1": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
+            "cfg_2": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
+            "cfg_3": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
+            "cfg_4": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
+            "cfg_5": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, selection_count, cfg_1, cfg_2, cfg_3, cfg_4, cfg_5):
+        xy_type = "CFG Scale"
+        xy_value = [cfg for idx, cfg in enumerate([cfg_1, cfg_2, cfg_3, cfg_4, cfg_5], start=1) if idx <= selection_count]
+        if not xy_value:  # Check if the list is empty
+            return (None,)
+        return ((xy_type, xy_value),)
+
+
+# TSC XY Plot: Sampler Values
+class TSC_XYplot_Sampler:
+    
+    samplers = ["None"] + comfy.samplers.KSampler.SAMPLERS
+    schedulers = ["None"] + comfy.samplers.KSampler.SCHEDULERS
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+                            "sampler_1": (cls.samplers,),
+                            "scheduler_1": (cls.schedulers,),
+                            "sampler_2": (cls.samplers,),
+                            "scheduler_2": (cls.schedulers,),
+                            "sampler_3": (cls.samplers,),
+                            "scheduler_3": (cls.schedulers,),
+                            "sampler_4": (cls.samplers,),
+                            "scheduler_4": (cls.schedulers,),
+                            "sampler_5": (cls.samplers,),
+                            "scheduler_5": (cls.schedulers,),},
+                }
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, sampler_1, scheduler_1, sampler_2, scheduler_2, sampler_3, scheduler_3,
+                 sampler_4, scheduler_4, sampler_5, scheduler_5):
+
+        samplers = [sampler_1, sampler_2, sampler_3, sampler_4, sampler_5]
+        schedulers = [scheduler_1, scheduler_2, scheduler_3, scheduler_4, scheduler_5]
+
+        pairs = []
+        for sampler, scheduler in zip(samplers, schedulers):
+            if sampler != "None":
+                if scheduler != "None":
+                    pairs.append((sampler, scheduler))
+                else:
+                    pairs.append((sampler,None))
+
+        xy_type = "Sampler"
+        xy_value = pairs
+        if not xy_value:  # Check if the list is empty
+            return (None,)
+        return ((xy_type, xy_value),)
+
+
+# TSC XY Plot: Scheduler Values
+class TSC_XYplot_Scheduler:
+
+    schedulers = ["None"] + comfy.samplers.KSampler.SCHEDULERS
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "scheduler_1": (cls.schedulers,),
+            "scheduler_2": (cls.schedulers,),
+            "scheduler_3": (cls.schedulers,),
+            "scheduler_4": (cls.schedulers,),
+            "scheduler_5": (cls.schedulers,),},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, scheduler_1, scheduler_2, scheduler_3, scheduler_4, scheduler_5):
+        xy_type = "Scheduler"
+        xy_value = [scheduler for scheduler in [scheduler_1, scheduler_2, scheduler_3, scheduler_4, scheduler_5] if
+                      scheduler != "None"]
+        if not xy_value:  # Check if the list is empty
+            return (None,)
+        return ((xy_type, xy_value),)
+
+
+# TSC XY Plot: Denoise Values
+class TSC_XYplot_Denoise:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "select_count": ("INT", {"default": 0, "min": 0, "max": 5}),
+            "denoise_1": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+            "denoise_2": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+            "denoise_3": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+            "denoise_4": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+            "denoise_5": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, select_count, denoise_1, denoise_2, denoise_3, denoise_4, denoise_5):
+        xy_type = "Denoise"
+        xy_value = [denoise for idx, denoise in
+                    enumerate([denoise_1, denoise_2, denoise_3, denoise_4, denoise_5], start=1) if idx <= select_count]
+        if not xy_value:  # Check if the list is empty
+            return (None,)
+        return ((xy_type, xy_value),)
+
+
+# TSC XY Plot: VAE Values
+class TSC_XYplot_VAE:
+
+    vaes = ["None"] + folder_paths.get_filename_list("vae")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "vae_name_1": (cls.vaes,),
+            "vae_name_2": (cls.vaes,),
+            "vae_name_3": (cls.vaes,),
+            "vae_name_4": (cls.vaes,),
+            "vae_name_5": (cls.vaes,),},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, vae_name_1, vae_name_2, vae_name_3, vae_name_4, vae_name_5):
+        xy_type = "VAE"
+        xy_value = [vae for vae in [vae_name_1, vae_name_2, vae_name_3, vae_name_4, vae_name_5] if vae != "None"]
+        if not xy_value:  # Check if the list is empty
+            return (None,)
+        return ((xy_type, xy_value),)
+
+
+# TSC XY Plot: Checkpoint Values
+class TSC_XYplot_Checkpoint:
+
+    checkpoints = ["None"] + folder_paths.get_filename_list("checkpoints")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "ckpt_name_1": (cls.checkpoints,),
+            "clip_skip1": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
+            "ckpt_name_2": (cls.checkpoints,),
+            "clip_skip2": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
+            "ckpt_name_3": (cls.checkpoints,),
+            "clip_skip3": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
+            "ckpt_name_4": (cls.checkpoints,),
+            "clip_skip4": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
+            "ckpt_name_5": (cls.checkpoints,),
+            "clip_skip5": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, ckpt_name_1, clip_skip1, ckpt_name_2, clip_skip2, ckpt_name_3, clip_skip3,
+                 ckpt_name_4, clip_skip4, ckpt_name_5, clip_skip5):
+        xy_type = "Checkpoint"
+        checkpoints = [ckpt_name_1, ckpt_name_2, ckpt_name_3, ckpt_name_4, ckpt_name_5]
+        clip_skips = [clip_skip1, clip_skip2, clip_skip3, clip_skip4, clip_skip5]
+        xy_value = [(checkpoint, clip_skip) for checkpoint, clip_skip in zip(checkpoints, clip_skips) if
+                    checkpoint != "None"]
+        if not xy_value:  # Check if the list is empty
+            return (None,)
+        return ((xy_type, xy_value),)
+
+# TSC XY Plot: LoRA Values
+class TSC_XYplot_LoRA:
+
+    loras = ["None"] + folder_paths.get_filename_list("loras")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "model_strengths": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "clip_strengths": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "lora_name_1": (cls.loras,),
+            "lora_name_2": (cls.loras,),
+            "lora_name_3": (cls.loras,),
+            "lora_name_4": (cls.loras,),
+            "lora_name_5": (cls.loras,),},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, model_strengths, clip_strengths, lora_name_1, lora_name_2, lora_name_3, lora_name_4, lora_name_5):
+        xy_type = "LoRA"
+        loras = [lora_name_1, lora_name_2, lora_name_3, lora_name_4, lora_name_5]
+        xy_value = [(lora, model_strengths, clip_strengths) for lora in loras if lora != "None"]
+        if not xy_value:  # Check if the list is empty
+            return (None,)
+        return ((xy_type, xy_value),)
+
+# TSC XY Plot: LoRA Advanced
+class TSC_XYplot_LoRA_Adv:
+
+    loras = ["None"] + folder_paths.get_filename_list("loras")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "lora_name_1": (cls.loras,),
+            "model_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "clip_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "lora_name_2": (cls.loras,),
+            "model_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "clip_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "lora_name_3": (cls.loras,),
+            "model_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "clip_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "lora_name_4": (cls.loras,),
+            "model_str_4": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "clip_str_4": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "lora_name_5": (cls.loras,),
+            "model_str_5": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "clip_str_5": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, lora_name_1, model_str_1, clip_str_1, lora_name_2, model_str_2, clip_str_2,
+                 lora_name_3, model_str_3, clip_str_3, lora_name_4, model_str_4, clip_str_4, lora_name_5, model_str_5, clip_str_5):
+        xy_type = "LoRA"
+        loras = [lora_name_1, lora_name_2, lora_name_3, lora_name_4, lora_name_5]
+        model_strs = [model_str_1, model_str_2, model_str_3, model_str_4, model_str_5]
+        clip_strs = [clip_str_1, clip_str_2, clip_str_3, clip_str_4, clip_str_5]
+        xy_value = [(lora, model_str, clip_str) for lora, model_str, clip_str in zip(loras, model_strs, clip_strs) if lora != "None"]
+        if not xy_value:  # Check if the list is empty
+            return (None,)
+        return ((xy_type, xy_value),)
+
+
+# TSC XY Plot: Seeds Values
+class TSC_XYplot_JoinInputs:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "XY_1": ("XY",),
+            "XY_2": ("XY",),},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, XY_1, XY_2):
+        xy_type_1, xy_value_1 = XY_1
+        xy_type_2, xy_value_2 = XY_2
+
+        if xy_type_1 != xy_type_2:
+            print(f"\033[31mJoin XY Inputs Error:\033[0m Input types must match")
+            xy_type = "Error"
+            xy_value = ""
+        elif xy_type_1 == "Seeds++ Batch":
+            xy_type = xy_type_1
+            xy_value = [xy_value_1[0] + xy_value_2[0]]
+        else:
+            xy_type = xy_type_1
+            xy_value = xy_value_1 + xy_value_2
+        return ((xy_type, xy_value),)
+
+########################################################################################################################
 # TSC Image Overlay
 class TSC_ImageOverlay:
 
@@ -1223,8 +1822,20 @@ class TSC_ImageOverlay:
         # Return the edited base image
         return base
 
+########################################################################################################################
+# Install simple_eval if missing from packages
+def install_simpleeval():
+    if 'simpleeval' not in packages():
+        print("\033[32mEfficiency Nodes:\033[0m")
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'simpleeval'])
 
-# TSC Evaluate Integers
+def packages(versions=False):
+    return [(r.decode().split('==')[0] if not versions else r.decode()) for r in subprocess.check_output([sys.executable, '-m', 'pip', 'freeze']).split()]
+
+install_simpleeval()
+from simpleeval import simple_eval
+
+# TSC Evaluate Integers (https://github.com/danthedeckie/simpleeval)
 class TSC_EvaluateInts:
     @classmethod
     def INPUT_TYPES(cls):
@@ -1234,24 +1845,57 @@ class TSC_EvaluateInts:
                 "optional": {
                     "a": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 1}),
                     "b": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 1}),
-                    "c": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 1}),}
+                    "c": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 1}),},
                 }
-    RETURN_TYPES = ("INT", "FLOAT",)
+    RETURN_TYPES = ("INT", "FLOAT", "STRING",)
     OUTPUT_NODE = True
     FUNCTION = "evaluate"
-    CATEGORY = "Efficiency Nodes/Math"
+    CATEGORY = "Efficiency Nodes/Simple Eval"
 
     def evaluate(self, python_expression, print_to_console, a=0, b=0, c=0):
-        int_result = int(eval(python_expression))
-        float_result = float(eval(python_expression))
-        if print_to_console=="True":
-            print("\n\033[31mEvaluate Integers Debug:\033[0m")
+        # simple_eval doesn't require the result to be converted to a string
+        result = simple_eval(python_expression, names={'a': a, 'b': b, 'c': c})
+        int_result = int(result)
+        float_result = float(result)
+        string_result = str(result)
+        if print_to_console == "True":
+            print("\n\033[31mEvaluate Integers:\033[0m")
             print(f"\033[90m{{a = {a} , b = {b} , c = {c}}} \033[0m")
-            print(f"{python_expression} = \033[92m INT: " + str(int_result) + " , FLOAT: " + str(float_result) + "\033[0m")
-        return (int_result, float_result,)
+            print(f"{python_expression} = \033[92m INT: " + str(int_result) + " , FLOAT: " + str(
+                float_result) + ", STRING: " + string_result + "\033[0m")
+        return (int_result, float_result, string_result,)
 
+# TSC Evaluate Floats (https://github.com/danthedeckie/simpleeval)
+class TSC_EvaluateFloats:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+                    "python_expression": ("STRING", {"default": "((a + b) - c) / 2", "multiline": False}),
+                    "print_to_console": (["False", "True"],),},
+                "optional": {
+                    "a": ("FLOAT", {"default": 0, "min": -sys.float_info.max, "max": sys.float_info.max, "step": 1}),
+                    "b": ("FLOAT", {"default": 0, "min": -sys.float_info.max, "max": sys.float_info.max, "step": 1}),
+                    "c": ("FLOAT", {"default": 0, "min": -sys.float_info.max, "max": sys.float_info.max, "step": 1}),},
+                }
+    RETURN_TYPES = ("INT", "FLOAT", "STRING",)
+    OUTPUT_NODE = True
+    FUNCTION = "evaluate"
+    CATEGORY = "Efficiency Nodes/Simple Eval"
 
-# TSC Evaluate Strings
+    def evaluate(self, python_expression, print_to_console, a=0, b=0, c=0):
+        # simple_eval doesn't require the result to be converted to a string
+        result = simple_eval(python_expression, names={'a': a, 'b': b, 'c': c})
+        int_result = int(result)
+        float_result = float(result)
+        string_result = str(result)
+        if print_to_console == "True":
+            print("\n\033[31mEvaluate Floats:\033[0m")
+            print(f"\033[90m{{a = {a} , b = {b} , c = {c}}} \033[0m")
+            print(f"{python_expression} = \033[92m INT: " + str(int_result) + " , FLOAT: " + str(
+                float_result) + ", STRING: " + string_result + "\033[0m")
+        return (int_result, float_result, string_result,)
+
+# TSC Evaluate Strings (https://github.com/danthedeckie/simpleeval)
 class TSC_EvaluateStrs:
     @classmethod
     def INPUT_TYPES(cls):
@@ -1266,23 +1910,48 @@ class TSC_EvaluateStrs:
     RETURN_TYPES = ("STRING",)
     OUTPUT_NODE = True
     FUNCTION = "evaluate"
-    CATEGORY = "Efficiency Nodes/Math"
+    CATEGORY = "Efficiency Nodes/Simple Eval"
 
     def evaluate(self, python_expression, print_to_console, a="", b="", c=""):
-        result = str(eval(python_expression))
-        if print_to_console=="True":
-            print("\n\033[31mEvaluate Strings Debug:\033[0m")
+        variables = {'a': a, 'b': b, 'c': c}  # Define the variables for the expression
+        functions = {"len": len}  # Define the functions for the expression
+        result = simple_eval(python_expression, names=variables, functions=functions)
+        if print_to_console == "True":
+            print("\n\033[31mEvaluate Strings:\033[0m")
             print(f"\033[90ma = {a} \nb = {b} \nc = {c}\033[0m")
-            print(f"{python_expression} = \033[92m" + result + "\033[0m")
-        return (result,)
+            print(f"{python_expression} = \033[92m" + str(result) + "\033[0m")
+        return (str(result),)  # Convert result to a string before returning
 
+# TSC Simple Eval Examples (https://github.com/danthedeckie/simpleeval)
+class TSC_EvalExamples:
+    filepath = os.path.join(my_dir, 'workflows', 'SimpleEval_Node_Examples.txt')
+    with open(filepath, 'r') as file:
+        examples = file.read()
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": { "models_text": ("STRING", {"default": cls.examples ,"multiline": True}),},}
+    RETURN_TYPES = ()
+    CATEGORY = "Efficiency Nodes/Simple Eval"
 
 # NODE MAPPING
 NODE_CLASS_MAPPINGS = {
     "KSampler (Efficient)": TSC_KSampler,
     "Efficient Loader": TSC_EfficientLoader,
     "XY Plot": TSC_XYplot,
+    "XY Input: Seeds++ Batch": TSC_XYplot_SeedsBatch,
+    "XY Input: Steps": TSC_XYplot_Steps,
+    "XY Input: CFG Scale": TSC_XYplot_CFG,
+    "XY Input: Sampler": TSC_XYplot_Sampler,
+    "XY Input: Scheduler": TSC_XYplot_Scheduler,
+    "XY Input: Denoise": TSC_XYplot_Denoise,
+    "XY Input: VAE": TSC_XYplot_VAE,
+    "XY Input: Checkpoint": TSC_XYplot_Checkpoint,
+    "XY Input: LoRA": TSC_XYplot_LoRA,
+    "XY Input: LoRA (Advanced)": TSC_XYplot_LoRA_Adv,
+    "Join XY Inputs": TSC_XYplot_JoinInputs,
     "Image Overlay": TSC_ImageOverlay,
     "Evaluate Integers": TSC_EvaluateInts,
+    "Evaluate Floats": TSC_EvaluateFloats,
     "Evaluate Strings": TSC_EvaluateStrs,
+    "Simple Eval Examples": TSC_EvalExamples
 }
