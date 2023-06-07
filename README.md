@@ -1,7 +1,7 @@
 Efficiency Nodes for ComfyUI
 =======
 ### A collection of <a href="https://github.com/comfyanonymous/ComfyUI" >ComfyUI</a> custom nodes to help streamline workflows and reduce total node count.
-## [Direct Download Link](https://github.com/LucianoCirino/efficiency-nodes-comfyui/releases/download/v1.35/efficiencyNodesFor_v135.zip)
+## [Direct Download Link](https://github.com/LucianoCirino/efficiency-nodes-comfyui/releases/download/V1.5/efficiency-nodes-comfyui_V1.5.zip)
 
 ## **Currently Available Nodes:**
 <details><summary>Ksampler (Efficient)</summary><ul>
