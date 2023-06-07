@@ -1,0 +1,12 @@
+{
+    "Efficient Loader": {
+        "ckpt": 1,
+        "vae": 1,
+        "lora": 1
+    },
+    "XY Plot": {
+        "ckpt": 5,
+        "vae": 5,
+        "lora": 5
+    }
+}
