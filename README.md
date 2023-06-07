@@ -12,7 +12,7 @@ Efficiency Nodes for ComfyUI
 • A combination of common initialization nodes.
 </ul></details>
 
-<details><summary>XY Plot</summary><ul>
+<details><summary>XY Plotter Nodes</summary><ul>
 • A collection of nodes that allows users to specify parameters for the KSampler (Efficient) to plot on a grid.
 </ul></details>
 
@@ -20,8 +20,8 @@ Efficiency Nodes for ComfyUI
 • Node that allows for flexible image overlaying.
 </ul></details>
 
-<details><summary>SimpleEval</summary><ul>
-•  A collection of nodes that allows users to write simple Python expressions using the "<a href="https://github.com/danthedeckie/simpleeval" >simpleeval</a>" library.
+<details><summary>SimpleEval Nodes</summary><ul>
+•  A collection of nodes that allows users to write simple Python expressions for a variety of data types using the "<a href="https://github.com/danthedeckie/simpleeval" >simpleeval</a>" library.
   
 </ul></details>
 
