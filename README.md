@@ -5,10 +5,7 @@ Efficiency Nodes for ComfyUI
 
 ## **Currently Available Nodes:**
 <details><summary>Ksampler (Efficient)</summary><ul>
-• A modded KSampler with the ability to preview and output images.<br>
-• Re-outputs key inputs which helps promote a cleaner and more streamlined workflow look for ComfyUI.<br>
-• Can force hold all of its outputs without regenerating by setting its state to "Hold".<br>
-• Has the capability to generate 2D plots that allow for easy comparison of different parameter settings.
+• A modded KSampler with the ability to preview/output images and run scripts.<br>
 </ul></details>
 
 <details><summary>Efficient Loader</summary><ul>
@@ -16,23 +13,15 @@ Efficiency Nodes for ComfyUI
 </ul></details>
 
 <details><summary>XY Plot</summary><ul>
-• A node that allows users to specify parameters for the KSampler (Efficient) to plot on a grid.
+• A collection of nodes that allows users to specify parameters for the KSampler (Efficient) to plot on a grid.
 </ul></details>
 
 <details><summary>Image Overlay</summary><ul>
 • Node that allows for flexible image overlaying.
 </ul></details>
 
-<details><summary>Evaluate Integers</summary><ul>
-• 3 integer input node that gives the user ability to write simpleeval python expressions and output results as a INT/FLOAT/STRING.
-</ul></details>
-
-<details><summary>Evaluate Floats</summary><ul>
-• 3 float input node that gives the user ability to write simpleeval python expressions and output results as a INT/FLOAT/STRING.
-</ul></details>
-
-<details><summary>Evaluate Strings</summary><ul>
-• 3 string input node that gives the user ability to write simpleeval python expressions and output results as a STRING.
+<details><summary>SimpleEval</summary><ul>
+•  A collection of nodes that allows users to write simple Python expressions using the "simpleeval" library.
 </ul></details>
 
 ## **Examples:**
