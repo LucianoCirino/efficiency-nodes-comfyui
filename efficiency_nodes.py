@@ -765,7 +765,8 @@ class TSC_KSampler:
 
                 # Optimize image generation by prioritizing Checkpoint>LoRA>VAE as X in For Loop. Flip back when done.
                 if Y_type == "Checkpoint" or ( Y_type == "LoRA" and X_type != "Checkpoint") or  \
-                        (Y_type == "VAE" and (X_type != "Checkpoint" and X_type != "LoRA")):
+                        (Y_type == "VAE" and (X_type != "Checkpoint" and X_type != "LoRA")) or \
+                        (X_type == "Nothing" and Y_type != "Nothing"):
                     flip_xy = True
                     X_type, Y_type = Y_type, X_type
                     X_value, Y_value = Y_value, X_value
