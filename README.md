@@ -21,7 +21,8 @@ Efficiency Nodes for ComfyUI
 </ul></details>
 
 <details><summary>SimpleEval</summary><ul>
-•  A collection of nodes that allows users to write simple Python expressions using the "simpleeval" library.
+•  A collection of nodes that allows users to write simple Python expressions using the "<a href="https://github.com/danthedeckie/simpleeval" >simpleeval</a>" library.
+  
 </ul></details>
 
 ## **Examples:**
