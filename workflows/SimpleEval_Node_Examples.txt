@@ -1,0 +1,56 @@
+The Evaluate Integers, Floats, and Strings nodes 
+now employ the SimpleEval library, enabling secure 
+creation and execution of custom Python expressions.
+
+(https://github.com/danthedeckie/simpleeval)
+
+Below is a short list of what is possible.
+______________________________________________
+
+"EVALUATE INTEGERS/FLOATS" NODE EXPRESSION EXAMPLES:
+
+Addition: a + b + c
+Subtraction: a - b - c
+Multiplication: a * b * c
+Division: a / b / c
+Modulo: a % b % c
+Exponentiation: a ** b ** c
+Floor Division: a // b // c
+Absolute Value: abs(a) + abs(b) + abs(c)
+Maximum: max(a, b, c)
+Minimum: min(a, b, c)
+Sum of Squares: a**2 + b**2 + c**2
+Bitwise And: a & b & c
+Bitwise Or: a | b | c
+Bitwise Xor: a ^ b ^ c
+Left Shift: a << 1 + b << 1 + c << 1
+Right Shift: a >> 1 + b >> 1 + c >> 1
+Greater Than Comparison: a > b > c
+Less Than Comparison: a < b < c
+Equal To Comparison: a == b == c
+Not Equal To Comparison: a != b != c
+______________________________________________
+
+"EVALUATE STRINGS" NODE EXPRESSION EXAMPLES:
+
+Concatenate: a + b + c
+Format: f'{a} {b} {c}'
+Length: len(a) + len(b) + len(c)
+Uppercase: a.upper() + b.upper() + c.upper()
+Lowercase: a.lower() + b.lower() + c.lower()
+Capitalize: a.capitalize() + b.capitalize() + c.capitalize()
+Title Case: a.title() + b.title() + c.title()
+Strip: a.strip() + b.strip() + c.strip()
+Find Substring: a.find('sub') + b.find('sub') + c.find('sub')
+Replace Substring: a.replace('old', 'new') + b.replace('old', 'new') + c.replace('old', 'new')
+Count Substring: a.count('sub') + b.count('sub') + c.count('sub')
+Check Numeric: a.isnumeric() + b.isnumeric() + c.isnumeric()
+Check Alphabetic: a.isalpha() + b.isalpha() + c.isalpha()
+Check Alphanumeric: a.isalnum() + b.isalnum() + c.isalnum()
+Check Start: a.startswith('prefix') + b.startswith('prefix') + c.startswith('prefix')
+Check End: a.endswith('suffix') + b.endswith('suffix') + c.endswith('suffix')
+Split: a.split(' ') + b.split(' ') + c.split(' ')
+Zero Fill: a.zfill(5) + b.zfill(5) + c.zfill(5)
+Slice: a[:5] + b[:5] + c[:5]
+Reverse: a[::-1] + b[::-1] + c[::-1]
+______________________________________________
