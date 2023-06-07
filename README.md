@@ -24,11 +24,15 @@ Efficiency Nodes for ComfyUI
 </ul></details>
 
 <details><summary>Evaluate Integers</summary><ul>
-• 3 integer input node that gives the user ability to write their own python expression for a INT/FLOAT type output.
+• 3 integer input node that gives the user ability to write simpleeval python expressions and output results as a INT/FLOAT/STRING.
+</ul></details>
+
+<details><summary>Evaluate Floats</summary><ul>
+• 3 float input node that gives the user ability to write simpleeval python expressions and output results as a INT/FLOAT/STRING.
 </ul></details>
 
 <details><summary>Evaluate Strings</summary><ul>
-• 3 string input node that gives the user ability to write their own python expression for a STRING type output.
+• 3 string input node that gives the user ability to write simpleeval python expressions and output results as a STRING.
 </ul></details>
 
 ## **Examples:**
@@ -39,7 +43,7 @@ Efficiency Nodes for ComfyUI
 
 - 2D Plotting using the **XY Plot** & **Ksampler (Efficient)** nodes 
 
-<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/Seeds%20vs%20Samplers.png" width="720">
+<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/1_.png" width="720">
 
 - Photobashing using the **Image Overlay** node
 
