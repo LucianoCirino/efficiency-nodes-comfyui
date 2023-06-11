@@ -1,0 +1,22 @@
+{
+    "Efficient Loader": {
+        "model_cache": {
+            "ckpt": 1,
+            "vae": 1,
+            "lora": 1
+        }
+    },
+    "KSampler (Efficient)": {
+        "xyplot_as_output_image": false,
+	"vae_tiled": false
+    },
+    "XY Plot": {
+        "model_cache": {
+            "ckpt": 5,
+            "vae": 5,
+            "lora": 5
+        },
+	"vae_tiled": false
+    }
+}
+
