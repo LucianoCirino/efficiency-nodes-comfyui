@@ -1,0 +1,42 @@
+EFFICIENCY NODES - XY Plot Manual Entry Syntax Notes
+______________________________________________
+Type: Sampler
+
+if not defined by X/Y_value syntax, the default_scheduler = Ksampler (Efficient)'s Scheduler
+
+1. sampler_1;sampler_2 					= sampler_1(default_scheduler), sampler_2(default_scheduler)
+2. sampler_1,scheduler_1;sampler_2; 			= sampler_1(scheduler_1), sampler_2(default_scheduler)
+3. sampler_1;sampler_2;,default_scheduler		= sampler_1(default_scheduler), sampler_2(default_scheduler)
+4. sampler_1;sampler_2,scheduler_2;,default_scheduler	= sampler_1(default_scheduler), sampler_2(scheduler_2)	
+
+______________________________________________
+Type: Checkpoint
+
+if not defined by X/Y_value syntax, the default_clip_skip = Efficient Loader's Clip Skip
+
+1. ckpt_1;ckpt_2 					= ckpt_1(default_clip_skip), ckpt_2(default_clip_skip)
+2. ckpt_1_1,clip_skip_1;ckpt_2; 			= ckpt_1(clip_skip_1), ckpt_2(default_clip_skip)
+3. ckpt_1;ckpt_2;,default_clip_skip			= ckpt_1(default_clip_skip), ckpt_2(default_clip_skip)
+4. ckpt_1;ckpt_2,clip_skip_2;,default_clip_skip		= ckpt_1(default_clip_skip), ckpt_2(clip_skip_2)
+
+______________________________________________
+
+Type: LoRA
+
+if not defined by X/Y_value syntax, the default_lora_model_str = default_lora_clip_str = 1
+
+def_mod_str = default_lora_model_str
+def_clip_str =  default_lora_clip_str
+
+1. lora_1;lora_2 					= lora_1(default_clip_skip), lora_2(default_clip_skip)
+2. lora_1,mod_str_1;lora_2; 				= lora_1(mod_str_1,1), lora_2(1,1)
+3. lora_1;lora_2;,def_mod_str				= lora_1(def_mod_str,1), lora_2(def_mod_str,1)
+4. lora_1;lora_2,mod_str_2;,def_mod_str,def_clip_str	= lora_1(def_mod_str,def_clip_str), lora_2(mod_str_2,def_clip_str)
+
+______________________________________________
+
+Notes:
+- Trailing semicolons, new entry lines, and spaces are removed when parsing input strings.
+- Any parameter not defined by the XY Plot's inputs are defined by the Efficient Loader and Ksampler (Efficient).
+  For example, if the scheduler isn't specified when plotting Samplers, the script will use
+  the scheduler set by the Ksampler (Efficient).
