@@ -29,7 +29,7 @@ Efficiency Nodes for ComfyUI
   
 - HiResFix using the **Efficient Loader** & **Ksampler (Efficient)**
 
-<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/HiResFix_.png" width="720">
+<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/HiResFix__.png" width="720">
 
 - 2D Plotting using the **XY Plot** & **Ksampler (Efficient)** nodes 
 
