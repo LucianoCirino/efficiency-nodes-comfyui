@@ -2065,14 +2065,14 @@ class TSC_XYplot_Manual_XY_Entry:
     def xy_value(self, X_type, X_value, Y_type, Y_value, prompt=None, my_unique_id=None):
 
         # Store X values as arrays
-        if X_type != "Positive Prompt S/R" and X_type != "Negative Prompt S/R":
+        if X_type not in {"Positive Prompt S/R", "Negative Prompt S/R", "VAE", "Checkpoint", "LoRA"}:
             X_value = X_value.replace(" ", "")  # Remove spaces
         X_value = X_value.replace("\n", "")  # Remove newline characters
         X_value = X_value.rstrip(";")  # Remove trailing semicolon
         X_value = X_value.split(";")  # Turn to array
 
         # Store Y values as arrays
-        if Y_type != "Positive Prompt S/R" and Y_type != "Negative Prompt S/R":
+        if Y_type not in {"Positive Prompt S/R", "Negative Prompt S/R", "VAE", "Checkpoint", "LoRA"}:
             Y_value = Y_value.replace(" ", "")  # Remove spaces
         Y_value = Y_value.replace("\n", "")  # Remove newline characters
         Y_value = Y_value.rstrip(";")  # Remove trailing semicolon
