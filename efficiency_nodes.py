@@ -517,6 +517,7 @@ class TSC_KSampler:
                      "latent_image": ("LATENT",),
                      "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                      "preview_image": (["Disabled", "Enabled"],),
+                     "preview_grid": (["Disabled", "Enabled"],),
                      },
                 "optional": { "optional_vae": ("VAE",),
                               "script": ("SCRIPT",),},
@@ -530,7 +531,7 @@ class TSC_KSampler:
     CATEGORY = "Efficiency Nodes/Sampling"
     
     def sample(self, sampler_state, model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-               latent_image, preview_image, denoise=1.0, prompt=None, extra_pnginfo=None, my_unique_id=None,
+               latent_image, preview_image, preview_grid,denoise=1.0, prompt=None, extra_pnginfo=None, my_unique_id=None,
                optional_vae=(None,), script=None):
 
         # Extract node_settings from json
@@ -543,12 +544,11 @@ class TSC_KSampler:
             with open(settings_file, 'r') as file:
                 node_settings = json.load(file)
             # Retrieve the settings
-            xyplot_as_output_image = node_settings.get("KSampler (Efficient)", {}).get('xyplot_as_output_image', False)
             kse_vae_tiled = node_settings.get("KSampler (Efficient)", {}).get('vae_tiled', False)
             xy_vae_tiled = node_settings.get("XY Plot", {}).get('vae_tiled', False)
-            return xyplot_as_output_image, kse_vae_tiled, xy_vae_tiled
+            return kse_vae_tiled, xy_vae_tiled
 
-        xyplot_as_output_image, kse_vae_tiled, xy_vae_tiled = get_settings()
+        kse_vae_tiled, xy_vae_tiled = get_settings()
 
         # Functions for previewing images in Ksampler
         def map_filename(filename):
@@ -1499,7 +1499,7 @@ class TSC_KSampler:
             update_value_by_id("results", my_unique_id, results)
 
             # Squeeze and Stack the tensors, and store results
-            if xyplot_as_output_image == False:
+            if preview_grid == "disabled":
                 image_tensor_list = torch.stack([tensor.squeeze() for tensor in image_tensor_list])
             else:
                 image_tensor_list = images
