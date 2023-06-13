@@ -531,7 +531,7 @@ class TSC_KSampler:
     CATEGORY = "Efficiency Nodes/Sampling"
     
     def sample(self, sampler_state, model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-               latent_image, preview_image, preview_grid,denoise=1.0, prompt=None, extra_pnginfo=None, my_unique_id=None,
+               latent_image, preview_image, preview_grid, denoise=1.0, prompt=None, extra_pnginfo=None, my_unique_id=None,
                optional_vae=(None,), script=None):
 
         # Extract node_settings from json
@@ -1499,7 +1499,7 @@ class TSC_KSampler:
             update_value_by_id("results", my_unique_id, results)
 
             # Squeeze and Stack the tensors, and store results
-            if preview_grid == "disabled":
+            if preview_grid == "Disabled":
                 image_tensor_list = torch.stack([tensor.squeeze() for tensor in image_tensor_list])
             else:
                 image_tensor_list = images
