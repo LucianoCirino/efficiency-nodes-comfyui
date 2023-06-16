@@ -543,12 +543,11 @@ class TSC_KSampler:
             with open(settings_file, 'r') as file:
                 node_settings = json.load(file)
             # Retrieve the settings
-            xyplot_as_output_image = node_settings.get("KSampler (Efficient)", {}).get('xyplot_as_output_image', False)
             kse_vae_tiled = node_settings.get("KSampler (Efficient)", {}).get('vae_tiled', False)
             xy_vae_tiled = node_settings.get("XY Plot", {}).get('vae_tiled', False)
-            return xyplot_as_output_image, kse_vae_tiled, xy_vae_tiled
+            return kse_vae_tiled, xy_vae_tiled
 
-        xyplot_as_output_image, kse_vae_tiled, xy_vae_tiled = get_settings()
+        kse_vae_tiled, xy_vae_tiled = get_settings()
 
         # Functions for previewing images in Ksampler
         def map_filename(filename):
@@ -632,7 +631,7 @@ class TSC_KSampler:
         # Vae input check
         vae = optional_vae
         if vae == (None,):
-            print('\033[32mKSampler(Efficient)[{}] Warning:\033[0m No vae input detected, preview and output image disabled.\n'.format(my_unique_id))
+            print('\033[33mKSampler(Efficient) Warning:\033[0m No vae input detected, preview and output image disabled.\n')
             preview_image = "Disabled"
 
         # Init last_results
@@ -761,6 +760,11 @@ class TSC_KSampler:
                 return {"ui": {"images": list()},
                         "result": (model, positive, negative, last_latent, vae, last_images,)}
 
+            # If preview_image set to disabled, run script anyways with message
+            if preview_image == "Disabled":
+                print('\033[33mKSampler(Efficient) Warning:\033[0m The preview image cannot be disabled when running'
+                      ' the XY Plot script, proceeding as if it was enabled.\n')
+
             # Extract the 'samples' tensor and split it into individual image tensors
             image_tensors = torch.split(latent_image['samples'], 1, dim=0)
 
@@ -789,7 +793,7 @@ class TSC_KSampler:
                 clip_skip = None
 
                 # Unpack script Tuple (X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, dependencies)
-                X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models, dependencies = script
+                X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models, xyplot_as_output_image, dependencies = script
 
                 # Unpack Effficient Loader dependencies
                 if dependencies is not None:
@@ -1518,8 +1522,12 @@ class TSC_KSampler:
 
             print("-" * 40)  # Print an empty line followed by a separator line
 
-            # Output image results to ui and node outputs
-            return {"ui": {"images": results}, "result": (model, positive, negative, {"samples": latent_list}, vae, image_tensor_list,)}
+            images = list() if preview_image == "Output Only" else results
+
+            return {
+                "ui": {"images": images},
+                "result": (model, positive, negative, {"samples": latent_list}, vae, image_tensor_list,)
+            }
 
 ########################################################################################################################
 # TSC XY Plot
@@ -1531,7 +1539,8 @@ class TSC_XYplot:
                     "grid_spacing": ("INT", {"default": 0, "min": 0, "max": 500, "step": 5}),
                     "XY_flip": (["False","True"],),
                     "Y_label_orientation": (["Horizontal", "Vertical"],),
-                    "cache_models": (["True", "False"],),},
+                    "cache_models": (["True", "False"],),
+                    "ksampler_output_image": (["Plot", "Images"],),},
                 "optional": {"dependencies": ("DEPENDENCIES", ),
                              "X": ("XY", ),
                              "Y": ("XY", ),},}
@@ -1541,7 +1550,7 @@ class TSC_XYplot:
     FUNCTION = "XYplot"
     CATEGORY = "Efficiency Nodes/XY Plot"
 
-    def XYplot(self, grid_spacing, XY_flip, Y_label_orientation, cache_models, dependencies=None, X=None, Y=None):
+    def XYplot(self, grid_spacing, XY_flip, Y_label_orientation, cache_models, ksampler_output_image, dependencies=None, X=None, Y=None):
 
         # Unpack X & Y Tuples if connected
         if X != None:
@@ -1589,7 +1598,11 @@ class TSC_XYplot:
             X_type, Y_type = Y_type, X_type
             X_value, Y_value = Y_value, X_value
 
-        return ((X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models, dependencies),)
+        # Define Ksampler output image behavior
+        xyplot_as_output_image = ksampler_output_image == "Plot"
+
+        return ((X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models,
+                 xyplot_as_output_image, dependencies),)
 
 
 # TSC XY Plot: Seeds Values
