@@ -7,7 +7,6 @@
         }
     },
     "KSampler (Efficient)": {
-        "xyplot_as_output_image": false,
 	"vae_tiled": false
     },
     "XY Plot": {
