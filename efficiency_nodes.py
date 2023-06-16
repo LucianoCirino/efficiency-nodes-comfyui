@@ -516,7 +516,7 @@ class TSC_KSampler:
                      "negative": ("CONDITIONING",),
                      "latent_image": ("LATENT",),
                      "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                     "preview_image": (["Disabled", "Enabled"],),
+                     "preview_image": (["Disabled", "Enabled", "Output Only"],),
                      },
                 "optional": { "optional_vae": ("VAE",),
                               "script": ("SCRIPT",),},
@@ -695,9 +695,13 @@ class TSC_KSampler:
                 results = preview_images(images, filename_prefix)
                 update_value_by_id("results", my_unique_id, results)
 
+                # Determine what the 'images' value should be
+                images_value = list() if preview_image == "Output Only" else results
+
                 # Output image results to ui and node outputs
-                return {"ui": {"images": results},
+                return {"ui": {"images": images_value},
                         "result": (model, positive, negative, {"samples": latent}, vae, images,)}
+
 
         # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
         # If the sampler state is "Hold"
@@ -731,8 +735,11 @@ class TSC_KSampler:
                     images = last_images
                     results = last_results
 
+                # Determine what the 'images' value should be
+                images_value = list() if preview_image == "Output Only" else results
+
                 # Output image results to ui and node outputs
-                return {"ui": {"images": results},
+                return {"ui": {"images": images_value},
                         "result": (model, positive, negative, {"samples": latent}, vae, images,)}
 
         # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
