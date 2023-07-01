@@ -1012,6 +1012,21 @@ class TSC_KSampler:
                         else:
                             text = f"<{round(lora_model_wt, 2)},{round(lora_clip_wt, 2)}> {lora_filename}"
 
+                    # if the var type is model strength then update the lora model and lora model weight, generates labels        
+                    elif var_type == "model_str":   
+                        print(var)                     
+                        lora_name = var[0]
+                        lora_model_wt = var[1]
+                        lora_filename = os.path.basename(lora_name)
+                        text = f"{(lora_name)} Model Weight {round(lora_model_wt, 3)}"
+                        
+                    # if the var type is clip strength then update the lora model and lora clip weight, generates labels  
+                    elif var_type == "clip_str":
+                        lora_name = var[0]
+                        lora_clip_wt = var[1]
+                        lora_filename = os.path.basename(lora_name)
+                        text = f"{(lora_name)} Clip Weight {round(lora_clip_wt, 3)}"
+                        
                     # For any other var_type, set text to ""
                     else:
                         text = ""
@@ -1085,6 +1100,14 @@ class TSC_KSampler:
                                                 cache=None, ckpt_cache=cache[1])
                         encode = True
 
+                    elif (X_type == "model_str" or Y_type == "model_str"):
+                        model, clip = load_lora(lora_name, ckpt_name, lora_model_wt, lora_clip_wt, script_node_id, cache=cache[2])
+                        encode = True
+
+                    elif (X_type == "clip_str" or Y_type == "clip_str"):
+                        model, clip = load_lora(lora_name, ckpt_name, lora_model_wt, lora_clip_wt, script_node_id, cache=cache[2])
+                        encode = True
+                        
                     # Encode Prompt if required
                     prompt_types = ["Positive Prompt S/R", "Negative Prompt S/R", "Clip Skip"]
                     if (X_type in prompt_types and index == 0) or Y_type in prompt_types:
@@ -2020,6 +2043,45 @@ class TSC_XYplot_LoRA_Adv:
             return (None,)
         return ((xy_type, xy_value),)
 
+# TSC XY Plot: (single) LoRA Weights
+class TSC_XYplot_Lora_Weights:
+    loras = ["None"] + folder_paths.get_filename_list("loras")
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "lora_name": (cls.loras,),
+            "num_of_model_entries": ("INT", {"default": 2, "min": 2, "max": 20}),
+            "num_of_clip_entries": ("INT", {"default": 2, "min": 2, "max": 20}),
+            "model_str_min": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.1}),
+            "clip_str_min": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.1}),
+            "model_str_max": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.1}),
+            "clip_str_max": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.1}),},
+        }
+        
+    RETURN_TYPES = ("XY", "XY",)
+    RETURN_NAMES = ("X", "Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    
+    def xy_value(self,lora_name, num_of_model_entries, num_of_clip_entries, model_str_min, clip_str_min, model_str_max, clip_str_max):
+        X_type = "model_str"
+        Y_type = "clip_str"
+
+        X_value = []
+        Y_value = []
+        
+        #could probably set up to make the step size configurable instead? unsure which is more useful
+        model_step = (model_str_max - model_str_min) / (num_of_model_entries - 1)
+        clip_step = (clip_str_max - clip_str_min) / (num_of_clip_entries - 1)
+
+        for x in range(num_of_model_entries):
+            X_value.append([lora_name, round((x * model_step) + model_str_min, 3)])
+        
+        for y in range(num_of_clip_entries):
+            Y_value.append([lora_name, round((y * clip_step) + clip_str_min, 3)])
+
+        return ((X_type, X_value), (Y_type, Y_value),)
 
 # TSC XY Plot: Manual Entry Notes
 class TSC_XYplot_Manual_XY_Entry_Info:
