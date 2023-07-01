@@ -2738,6 +2738,7 @@ NODE_CLASS_MAPPINGS = {
     "XY Input: Clip Skip": TSC_XYplot_ClipSkip,
     "XY Input: LoRA": TSC_XYplot_LoRA,
     "XY Input: LoRA (Advanced)": TSC_XYplot_LoRA_Adv,
+    "XY Input: LoRA (Weights)": TSC_XYplot_Lora_Weights,
     "XY Input: Manual XY Entry": TSC_XYplot_Manual_XY_Entry,
     "Manual XY Entry Info": TSC_XYplot_Manual_XY_Entry_Info,
     "Join XY Inputs of Same Type": TSC_XYplot_JoinInputs,
