@@ -22,6 +22,9 @@ import psutil
 # Get the absolute path of the parent directory of the current script
 my_dir = os.path.dirname(os.path.abspath(__file__))
 
+# Add the My directory path to the sys.path list
+sys.path.append(my_dir)
+
 # Construct the absolute path to the ComfyUI directory
 comfy_dir = os.path.abspath(os.path.join(my_dir, '..', '..'))
 
@@ -35,6 +38,13 @@ font_path = os.path.join(my_dir, 'arial.ttf')
 import comfy.samplers
 import comfy.sd
 import comfy.utils
+
+# Load legacy lora functions
+from lora_patch import load_lora, load_lora_for_models
+
+# Replace the lora functions with the legacy functions
+comfy.sd.load_lora = load_lora
+comfy.sd.load_lora_for_models = load_lora_for_models
 
 MAX_RESOLUTION=8192
 
@@ -1568,6 +1578,7 @@ class TSC_XYplot:
         if (X_type == Y_type):
             if X_type != "Nothing":
                 print(f"\033[31mXY Plot Error:\033[0m X and Y input types must be different.")
+            '''
             else:
                 # Print XY Plot Inputs
                 print("-" * 40)
@@ -1575,6 +1586,7 @@ class TSC_XYplot:
                 print(f"(X) {X_type}: {X_value}")
                 print(f"(Y) {Y_type}: {Y_value}")
                 print("-" * 40)
+            '''
             return (None,)
 
         # Check that dependencies is connected for Checkpoint and LoRA plots
