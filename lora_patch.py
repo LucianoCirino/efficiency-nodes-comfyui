@@ -46,7 +46,7 @@ LORA_UNET_MAP_RESNET = {
     "skip_connection": "resnets_{}_conv_shortcut"
 }
 
-def load_lora(path, to_load):
+def load_lora_legacy(path, to_load):
     lora = utils.load_torch_file(path)
     patch_dict = {}
     loaded_keys = set()
@@ -244,10 +244,10 @@ def model_lora_keys(model, key_map={}):
 
     return key_map
 
-def load_lora_for_models(model, clip, lora_path, strength_model, strength_clip):
+def load_lora_for_models_legacy(model, clip, lora_path, strength_model, strength_clip):
     key_map = model_lora_keys(model.model)
     key_map = model_lora_keys(clip.cond_stage_model, key_map)
-    loaded = load_lora(lora_path, key_map)
+    loaded = load_lora_legacy(lora_path, key_map)
     new_modelpatcher = model.clone()
     k = new_modelpatcher.add_patches(loaded, strength_model)
     new_clip = clip.clone()
