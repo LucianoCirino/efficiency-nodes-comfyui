@@ -40,11 +40,7 @@ import comfy.sd
 import comfy.utils
 
 # Load legacy lora functions
-from lora_patch import load_lora, load_lora_for_models
-
-# Replace the lora functions with the legacy functions
-comfy.sd.load_lora = load_lora
-comfy.sd.load_lora_for_models = load_lora_for_models
+from lora_patch import load_lora_legacy, load_lora_for_models_legacy
 
 MAX_RESOLUTION=8192
 
@@ -300,7 +296,7 @@ def load_lora(lora_name, ckpt_name, strength_model, strength_clip, id, cache=Non
 
     ckpt, clip, _ = load_checkpoint(ckpt_name, id, cache=ckpt_cache, cache_overwrite=cache_overwrite)
     lora_path = folder_paths.get_full_path("loras", lora_name)
-    lora_model, lora_clip = comfy.sd.load_lora_for_models(ckpt, clip, lora_path, strength_model, strength_clip)
+    lora_model, lora_clip = load_lora_for_models_legacy(ckpt, clip, lora_path, strength_model, strength_clip)
 
     if cache:
         if len([entry for entry in loaded_objects["lora"] if id in entry[-1]]) < cache:
@@ -425,8 +421,8 @@ class TSC_EfficientLoader:
                             "my_unique_id": "UNIQUE_ID",},
                 }
 
-    RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "LATENT", "VAE", "DEPENDENCIES",)
-    RETURN_NAMES = ("MODEL", "CONDITIONING+", "CONDITIONING-", "LATENT", "VAE", "DEPENDENCIES", )
+    RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "LATENT", "VAE", "CLIP", "DEPENDENCIES",)
+    RETURN_NAMES = ("MODEL", "CONDITIONING+", "CONDITIONING-", "LATENT", "VAE", "CLIP", "DEPENDENCIES", )
     FUNCTION = "efficientloader"
     CATEGORY = "Efficiency Nodes/Loaders"
 
@@ -469,7 +465,7 @@ class TSC_EfficientLoader:
         # Data for XY Plot
         dependencies = (vae_name, ckpt_name, clip, clip_skip, positive, negative, lora_name, lora_model_strength, lora_clip_strength)
 
-        return (model, [[clip.encode(positive), {}]], [[clip.encode(negative), {}]], {"samples":latent}, vae, dependencies, )
+        return (model, [[clip.encode(positive), {}]], [[clip.encode(negative), {}]], {"samples":latent}, vae, clip, dependencies, )
 
 ########################################################################################################################
 # TSC KSampler (Efficient)
