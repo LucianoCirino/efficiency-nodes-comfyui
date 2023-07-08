@@ -2487,7 +2487,7 @@ class TSC_ImageOverlay:
     CATEGORY = "Efficiency Nodes/Image"
 
     def apply_overlay_image(self, base_image, overlay_image, overlay_resize, resize_method, rescale_factor,
-                            width, height, x_offset, y_offset, rotation, opacity, optional_mask):
+                            width, height, x_offset, y_offset, rotation, opacity, optional_mask=None):
 
         # Pack tuples and assign variables
         size = width, height
