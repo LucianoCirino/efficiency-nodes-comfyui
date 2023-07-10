@@ -1311,7 +1311,7 @@ class TSC_KSampler:
                 # ______________________________________________________________________________________________________
                 def adjusted_font_size(text, initial_font_size, latent_width):
                     font = ImageFont.truetype(str(Path(font_path)), initial_font_size)
-                    text_width, _ = font.getsize(text)
+                    text_width = font.getlength(text)
 
                     if text_width > (latent_width * 0.9):
                         scaling_factor = 0.9  # A value less than 1 to shrink the font size more aggressively
@@ -1441,7 +1441,7 @@ class TSC_KSampler:
                             font = ImageFont.truetype(str(Path(font_path)), font_size)
 
                             # Calculate the text size and the starting position
-                            text_width, text_height = d.textsize(text, font=font)
+                            _, _, text_width, text_height = d.textbbox([0,0], text, font=font)
                             text_x = (img.width - text_width) // 2
                             text_y = (label_height - text_height) // 2
 
@@ -1477,7 +1477,7 @@ class TSC_KSampler:
                             font = ImageFont.truetype(str(Path(font_path)), font_size)
 
                             # Calculate the text size and the starting position
-                            text_width, text_height = d.textsize(text, font=font)
+                            _, _, text_width, text_height = d.textbbox([0,0], text, font=font)
                             text_x = (img.height - text_width) // 2
                             text_y = (font_size - text_height) // 2
 
