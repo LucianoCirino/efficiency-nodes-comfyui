@@ -40,3 +40,4 @@ Notes:
 - Any parameter not defined by the XY Plot's inputs are defined by the Efficient Loader and Ksampler (Efficient).
   For example, if the scheduler isn't specified when plotting Samplers, the script will use
   the scheduler set by the Ksampler (Efficient).
+- LoRA stacking through the XY Plot Manual Entry node is currently not supported.

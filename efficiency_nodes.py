@@ -34,371 +34,15 @@ sys.path.append(comfy_dir)
 # Construct the path to the font file
 font_path = os.path.join(my_dir, 'arial.ttf')
 
-# Import functions from nodes.py in the ComfyUI directory
+# Import functions from ComfyUI
 import comfy.samplers
 import comfy.sd
 import comfy.utils
 
-# Load legacy lora functions
-from lora_patch import load_lora_legacy, load_lora_for_models_legacy
+# Import my util functions
+from tsc_utils import *
 
 MAX_RESOLUTION=8192
-
-# Tensor to PIL (grabbed from WAS Suite)
-def tensor2pil(image: torch.Tensor) -> Image.Image:
-    return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
-
-# Convert PIL to Tensor (grabbed from WAS Suite)
-def pil2tensor(image: Image.Image) -> torch.Tensor:
-    return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
-
-def extract_node_info(prompt, id, indirect_key=None):
-    # Convert ID to string
-    id = str(id)
-    node_id = None
-
-    # If an indirect_key (like 'script') is provided, perform a two-step lookup
-    if indirect_key:
-        # Ensure the id exists in the prompt and has an 'inputs' entry with the indirect_key
-        if id in prompt and 'inputs' in prompt[id] and indirect_key in prompt[id]['inputs']:
-            # Extract the indirect_id
-            indirect_id = prompt[id]['inputs'][indirect_key][0]
-
-            # Ensure the indirect_id exists in the prompt
-            if indirect_id in prompt:
-                node_id = indirect_id
-                return prompt[indirect_id].get('class_type', None), node_id
-
-        # If indirect_key is not found within the prompt
-        return None, None
-
-    # If no indirect_key is provided, perform a direct lookup
-    return prompt.get(id, {}).get('class_type', None), node_id
-
-def extract_node_value(prompt, id, key):
-    # If ID is in data, return its 'inputs' value for a given key. Otherwise, return None.
-    return prompt.get(str(id), {}).get('inputs', {}).get(key, None)
-
-# Cache models in RAM
-loaded_objects = {
-    "ckpt": [], # (ckpt_name, ckpt_model, clip, bvae, [id])
-    "vae": [],  # (vae_name, vae, [id])
-    "lora": []  # (lora_name, ckpt_name, lora_model, clip_lora, strength_model, strength_clip, [id])
-}
-
-def print_loaded_objects_entries(id=None, prompt=None, show_id=False):
-    print("-" * 40)  # Print an empty line followed by a separator line
-    if id is not None:
-        id = str(id)  # Convert ID to string
-    if prompt is not None and id is not None:
-        node_name, _ = extract_node_info(prompt, id)
-        if show_id:
-            print(f"\033[36m{node_name} Models Cache: (node_id:{int(id)})\033[0m")
-        else:
-            print(f"\033[36m{node_name} Models Cache:\033[0m")
-    elif id is None:
-        print(f"\033[36mGlobal Models Cache:\033[0m")
-    else:
-        print(f"\033[36mModels Cache: \nnode_id:{int(id)}\033[0m")
-    entries_found = False
-    for key in ["ckpt", "vae", "lora"]:
-        entries_with_id = loaded_objects[key] if id is None else [entry for entry in loaded_objects[key] if id in entry[-1]]
-        if not entries_with_id:  # If no entries with the chosen ID, print None and skip this key
-            continue
-        entries_found = True
-        print(f"{key.capitalize()}:")
-        for i, entry in enumerate(entries_with_id, 1):  # Start numbering from 1
-            truncated_name = entry[0][:50]  # Truncate at 50 characters
-            if key == "lora":
-                lora_model_str_rounded = round(entry[4], 2)  # Round lora_weight to 2 decimal places
-                lora_clip_str_rounded = round(entry[4], 2)  # Round lora_weight to 2 decimal places
-                if id is None:
-                    associated_ids = ', '.join(map(str, entry[-1]))  # Gather all associated ids
-                    print(f"  [{i}] {truncated_name} (ids: {associated_ids}, {lora_model_str_rounded},"
-                          f" {lora_clip_str_rounded}, base_ckpt: {entry[1]})")
-                else:
-                    print(f"  [{i}] {truncated_name} ({lora_model_str_rounded},"
-                          f" {lora_clip_str_rounded}, base_ckpt: {entry[1]})")
-            else:
-                if id is None:
-                    associated_ids = ', '.join(map(str, entry[-1]))  # Gather all associated ids
-                    print(f"  [{i}] {truncated_name} (ids: {associated_ids})")
-                else:
-                    print(f"  [{i}] {truncated_name}")
-    if not entries_found:
-        print("-")
-
-# This function cleans global variables associated with nodes that are no longer detected on UI
-def globals_cleanup(prompt):
-    global loaded_objects
-    global last_helds
-
-    # Step 1: Clean up last_helds
-    for key in list(last_helds.keys()):
-        original_length = len(last_helds[key])
-        last_helds[key] = [(value, id) for value, id in last_helds[key] if str(id) in prompt.keys()]
-        ###if original_length != len(last_helds[key]):
-            ###print(f'Updated {key} in last_helds: {last_helds[key]}')
-
-    # Step 2: Clean up loaded_objects
-    for key in list(loaded_objects.keys()):
-        for i, tup in enumerate(list(loaded_objects[key])):
-            # Remove ids from id array in each tuple that don't exist in prompt
-            id_array = [id for id in tup[-1] if str(id) in prompt.keys()]
-            if len(id_array) != len(tup[-1]):
-                if id_array:
-                    loaded_objects[key][i] = tup[:-1] + (id_array,)
-                    ###print(f'Updated tuple at index {i} in {key} in loaded_objects: {loaded_objects[key][i]}')
-                else:
-                    # If id array becomes empty, delete the corresponding tuple
-                    loaded_objects[key].remove(tup)
-                    ###print(f'Deleted tuple at index {i} in {key} in loaded_objects because its id array became empty.')
-
-def load_checkpoint(ckpt_name, id, output_vae=True, cache=None, cache_overwrite=False):
-    """
-    Searches for tuple index that contains ckpt_name in "ckpt" array of loaded_objects.
-    If found, extracts the model, clip, and vae from the loaded_objects.
-    If not found, loads the checkpoint, extracts the model, clip, and vae.
-    The id parameter represents the node ID and is used for caching models for the XY Plot node.
-    If the cache limit is reached for a specific id, clears the cache and returns the loaded model, clip, and vae without adding a new entry.
-    If there is cache space, adds the id to the ids list if it's not already there.
-    If there is cache space and the checkpoint was not found in loaded_objects, adds a new entry to loaded_objects.
-
-    Parameters:
-    - ckpt_name: name of the checkpoint to load.
-    - id: an identifier for caching models for specific nodes.
-    - output_vae: boolean, if True loads the VAE too.
-    - cache (optional): an integer that specifies how many checkpoint entries with a given id can exist in loaded_objects. Defaults to None.
-    """
-    global loaded_objects
-
-    for entry in loaded_objects["ckpt"]:
-        if entry[0] == ckpt_name:
-            _, model, clip, vae, ids = entry
-            cache_full = cache and len([entry for entry in loaded_objects["ckpt"] if id in entry[-1]]) >= cache
-
-            if cache_full:
-                clear_cache(id, cache, "ckpt")
-            elif id not in ids:
-                ids.append(id)
-
-            return model, clip, vae
-
-    ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
-    out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae, output_clip=True,
-                                                embedding_directory=folder_paths.get_folder_paths("embeddings"))
-    model = out[0]
-    clip = out[1]
-    vae = out[2]  # bvae
-
-    if cache:
-        if len([entry for entry in loaded_objects["ckpt"] if id in entry[-1]]) < cache:
-            loaded_objects["ckpt"].append((ckpt_name, model, clip, vae, [id]))
-        else:
-            clear_cache(id, cache, "ckpt")
-            if cache_overwrite:
-                # Find the first entry with the id, remove the id from the entry's id list
-                for e in loaded_objects["ckpt"]:
-                    if id in e[-1]:
-                        e[-1].remove(id)
-                        # If the id list becomes empty, remove the entry from the "ckpt" list
-                        if not e[-1]:
-                            loaded_objects["ckpt"].remove(e)
-                        break
-                loaded_objects["ckpt"].append((ckpt_name, model, clip, vae, [id]))
-
-    return model, clip, vae
-
-def get_bvae_by_ckpt_name(ckpt_name):
-    for ckpt in loaded_objects["ckpt"]:
-        if ckpt[0] == ckpt_name:
-            return ckpt[3]  # return 'bvae' variable
-    return None  # return None if no match is found
-
-def load_vae(vae_name, id, cache=None, cache_overwrite=False):
-    """
-    Extracts the vae with a given name from the "vae" array in loaded_objects.
-    If the vae is not found, creates a new VAE object with the given name and adds it to the "vae" array.
-    Also stores the id parameter, which is used for caching models specifically for nodes with the given ID.
-    If the cache limit is reached for a specific id, returns the loaded vae without adding id or making a new entry in loaded_objects.
-    If there is cache space, and the id is not in the ids list, adds the id to the ids list.
-    If there is cache space, and the vae was not found in loaded_objects, adds a new entry to the loaded_objects.
-
-    Parameters:
-    - vae_name: name of the VAE to load.
-    - id (optional): an identifier for caching models for specific nodes. Defaults to None.
-    - cache (optional): an integer that specifies how many vae entries with a given id can exist in loaded_objects. Defaults to None.
-    """
-    global loaded_objects
-
-    for i, entry in enumerate(loaded_objects["vae"]):
-        if entry[0] == vae_name:
-            vae, ids = entry[1], entry[2]
-            if id not in ids:
-                if cache and len([entry for entry in loaded_objects["vae"] if id in entry[-1]]) >= cache:
-                    return vae
-                ids.append(id)
-            if cache:
-                clear_cache(id, cache, "vae")
-            return vae
-
-    vae_path = folder_paths.get_full_path("vae", vae_name)
-    vae = comfy.sd.VAE(ckpt_path=vae_path)
-
-    if cache:
-        if len([entry for entry in loaded_objects["vae"] if id in entry[-1]]) < cache:
-            loaded_objects["vae"].append((vae_name, vae, [id]))
-        else:
-            clear_cache(id, cache, "vae")
-            if cache_overwrite:
-                # Find the first entry with the id, remove the id from the entry's id list
-                for e in loaded_objects["vae"]:
-                    if id in e[-1]:
-                        e[-1].remove(id)
-                        # If the id list becomes empty, remove the entry from the "vae" list
-                        if not e[-1]:
-                            loaded_objects["vae"].remove(e)
-                        break
-                loaded_objects["vae"].append((vae_name, vae, [id]))
-
-    return vae
-
-def load_lora(lora_name, ckpt_name, strength_model, strength_clip, id, cache=None, ckpt_cache=None, cache_overwrite=False):
-    """
-    Extracts the Lora model with a given name from the "lora" array in loaded_objects.
-    If the Lora model is not found or strength values changed or model changed, creates a new Lora object with the given name and adds it to the "lora" array.
-    Also stores the id parameter, which is used for caching models specifically for nodes with the given ID.
-    If the cache limit is reached for a specific id, clears the cache and returns the loaded Lora model and clip without adding a new entry.
-    If there is cache space, adds the id to the ids list if it's not already there.
-    If there is cache space and the Lora model was not found in loaded_objects, adds a new entry to loaded_objects.
-
-    Parameters:
-    - lora_name: name of the Lora model to load.
-    - ckpt_name: name of the checkpoint from which the Lora model is created.
-    - strength_model: strength of the Lora model.
-    - strength_clip: strength of the clip in the Lora model.
-    - id: an identifier for caching models for specific nodes.
-    - cache (optional): an integer that specifies how many Lora entries with a given id can exist in loaded_objects. Defaults to None.
-    """
-    global loaded_objects
-
-    for entry in loaded_objects["lora"]:
-        if entry[0] == lora_name and entry[1] == ckpt_name and entry[4] == strength_model and entry[5] == strength_clip:
-            _, _, lora_model, lora_clip, _, _, ids = entry
-            cache_full = cache and len([entry for entry in loaded_objects["lora"] if id in entry[-1]]) >= cache
-
-            if cache_full:
-                clear_cache(id, cache, "lora")
-            elif id not in ids:
-                ids.append(id)
-
-            return lora_model, lora_clip
-
-    ckpt, clip, _ = load_checkpoint(ckpt_name, id, cache=ckpt_cache, cache_overwrite=cache_overwrite)
-    lora_path = folder_paths.get_full_path("loras", lora_name)
-    lora_model, lora_clip = load_lora_for_models_legacy(ckpt, clip, lora_path, strength_model, strength_clip)
-
-    if cache:
-        if len([entry for entry in loaded_objects["lora"] if id in entry[-1]]) < cache:
-            loaded_objects["lora"].append((lora_name, ckpt_name, lora_model, lora_clip, strength_model, strength_clip, [id]))
-        else:
-            clear_cache(id, cache, "lora")
-            if cache_overwrite:
-                # Find the first entry with the id, remove the id from the entry's id list
-                for e in loaded_objects["lora"]:
-                    if id in e[-1]:
-                        e[-1].remove(id)
-                        # If the id list becomes empty, remove the entry from the "lora" list
-                        if not e[-1]:
-                            loaded_objects["lora"].remove(e)
-                        break
-                loaded_objects["lora"].append((lora_name, ckpt_name, lora_model, lora_clip, strength_model, strength_clip, [id]))
-
-    return lora_model, lora_clip
-
-def clear_cache(id, cache, dict_name):
-    """
-    Clear the cache for a specific id in a specific dictionary (either "ckpt" or "vae").
-    If the cache limit is reached for a specific id, deletes the id from the oldest entry.
-    If the id array of the entry becomes empty, deletes the entry.
-    """
-    # Get all entries associated with the id_element
-    id_associated_entries = [entry for entry in loaded_objects[dict_name] if id in entry[-1]]
-    while len(id_associated_entries) > cache:
-        # Identify an older entry (but not necessarily the oldest) containing id
-        older_entry = id_associated_entries[0]
-        # Remove the id_element from the older entry
-        older_entry[-1].remove(id)
-        # If the id array of the older entry becomes empty after this, delete the entry
-        if not older_entry[-1]:
-            loaded_objects[dict_name].remove(older_entry)
-        # Update the id_associated_entries
-        id_associated_entries = [entry for entry in loaded_objects[dict_name] if id in entry[-1]]
-
-def clear_cache_by_exception(node_id, vae_dict=None, ckpt_dict=None, lora_dict=None):
-    """
-    This function deletes a specific ID from tuples in one or more specified dictionaries in the global 'loaded_objects' variable.
-    The function requires the 'node_id' to delete and takes optional arguments for each dictionary ('vae_dict', 'ckpt_dict', 'lora_dict').
-    If an argument is None, the function does nothing for that dictionary.
-    If an argument is an empty list, the function deletes the 'node_id' from all tuples in that dictionary.
-    For 'lora_dict', exceptions to deletion can be passed as a list of tuples.
-
-    node_id : The ID to delete.
-    vae_dict : The 'vae' dictionary exceptions. If empty list, delete 'node_id' from all 'vae' tuples. If None, do nothing.
-    ckpt_dict : The 'ckpt' dictionary exceptions. If empty list, delete 'node_id' from all 'ckpt' tuples. If None, do nothing.
-    lora_dict : The 'lora' dictionary exceptions. Each exception is a tuple of ('lora_name', 'ckpt_name', 'strength_model', 'strength_clip').
-                If empty list, delete 'node_id' from all 'lora' tuples. If None, do nothing.
-    """
-    global loaded_objects  # reference the global variable 'loaded_objects'
-
-    # Create a dictionary to map argument names to 'loaded_objects' dictionary names
-    dict_mapping = {
-        "vae_dict": "vae",
-        "ckpt_dict": "ckpt",
-        "lora_dict": "lora"
-    }
-
-    # Loop over the input arguments
-    for arg_name, arg_val in {"vae_dict": vae_dict, "ckpt_dict": ckpt_dict, "lora_dict": lora_dict}.items():
-        # Skip if argument is None
-        if arg_val is None:
-            continue
-
-        dict_name = dict_mapping[arg_name]  # get the corresponding dictionary name in 'loaded_objects'
-
-        # Iterate over a copy of the list to allow modification during iteration
-        for tuple_idx, tuple_item in enumerate(loaded_objects[dict_name].copy()):
-            # Handle 'lora_dict' exceptions differently, checking if the tuple matches one in exceptions
-            if arg_name == "lora_dict" and (tuple_item[0], tuple_item[1], tuple_item[4], tuple_item[5]) in arg_val:
-                continue
-            # For 'ckpt_dict' and 'vae_dict', check if the name is in exceptions
-            elif tuple_item[0] in arg_val:
-                continue
-
-            # Check if the 'node_id' is in the id array of the tuple
-            if node_id in tuple_item[-1]:
-                # Remove the 'node_id' from the id array
-                tuple_item[-1].remove(node_id)
-
-                # If the id array becomes empty, remove the entire tuple
-                if not tuple_item[-1]:
-                    loaded_objects[dict_name].remove(tuple_item)
-
-# Retrieve the cache number from 'node_settings' json file
-def get_cache_numbers(node_name):
-    # Get the directory path of the current file
-    my_dir = os.path.dirname(os.path.abspath(__file__))
-    # Construct the file path for node_settings.json
-    settings_file = os.path.join(my_dir, 'node_settings.json')
-    # Load the settings from the JSON file
-    with open(settings_file, 'r') as file:
-        node_settings = json.load(file)
-    # Retrieve the cache numbers for the given node
-    model_cache_settings = node_settings.get(node_name, {}).get('model_cache', {})
-    vae_cache = int(model_cache_settings.get('vae', 1))
-    ckpt_cache = int(model_cache_settings.get('ckpt', 1))
-    lora_cache = int(model_cache_settings.get('lora', 1))
-    return vae_cache, ckpt_cache, lora_cache
 
 ########################################################################################################################
 # TSC Efficient Loader
@@ -417,6 +61,7 @@ class TSC_EfficientLoader:
                               "empty_latent_width": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 64}),
                               "empty_latent_height": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 64}),
                               "batch_size": ("INT", {"default": 1, "min": 1, "max": 64})},
+                "optional": {"lora_stack": ("LORA_STACK", )},
                 "hidden": { "prompt": "PROMPT",
                             "my_unique_id": "UNIQUE_ID",},
                 }
@@ -427,7 +72,7 @@ class TSC_EfficientLoader:
     CATEGORY = "Efficiency Nodes/Loaders"
 
     def efficientloader(self, ckpt_name, vae_name, clip_skip, lora_name, lora_model_strength, lora_clip_strength,
-                        positive, negative, empty_latent_width, empty_latent_height, batch_size,
+                        positive, negative, empty_latent_width, empty_latent_height, batch_size, lora_stack=None,
                         prompt=None, my_unique_id=None):
 
         model: ModelPatcher | None = None
@@ -444,17 +89,22 @@ class TSC_EfficientLoader:
         vae_cache, ckpt_cache, lora_cache = get_cache_numbers("Efficient Loader")
 
         if lora_name != "None":
-            model, clip = load_lora(lora_name, ckpt_name, lora_model_strength, lora_clip_strength, my_unique_id,
-                                    cache=lora_cache, ckpt_cache=ckpt_cache, cache_overwrite=True)
+            lora_params = [(lora_name, lora_model_strength, lora_clip_strength)]
+            if lora_stack is not None:
+                lora_params.extend(lora_stack)
+            model, clip = load_lora(lora_params, ckpt_name, my_unique_id, cache=lora_cache, ckpt_cache=ckpt_cache, cache_overwrite=True)
             if vae_name == "Baked VAE":
                 vae = get_bvae_by_ckpt_name(ckpt_name)
         else:
             model, clip, vae = load_checkpoint(ckpt_name, my_unique_id, cache=ckpt_cache, cache_overwrite=True)
-            lora_name = None
+            lora_params = None
 
         # Check for custom VAE
         if vae_name != "Baked VAE":
             vae = load_vae(vae_name, my_unique_id, cache=vae_cache, cache_overwrite=True)
+
+        # Debugging
+        ###print_loaded_objects_entries()
 
         # CLIP skip
         if not clip:
@@ -463,43 +113,89 @@ class TSC_EfficientLoader:
         clip.clip_layer(clip_skip)
 
         # Data for XY Plot
-        dependencies = (vae_name, ckpt_name, clip, clip_skip, positive, negative, lora_name, lora_model_strength, lora_clip_strength)
+        dependencies = (vae_name, ckpt_name, clip, clip_skip, positive, negative, lora_params)
 
         return (model, [[clip.encode(positive), {}]], [[clip.encode(negative), {}]], {"samples":latent}, vae, clip, dependencies, )
 
 ########################################################################################################################
+# TSC LoRA Stacker
+class TSC_LoRA_Stacker:
+
+    loras = ["None"] + folder_paths.get_filename_list("loras")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "lora_name_1": (cls.loras,),
+            "lora_wt_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "lora_name_2": (cls.loras,),
+            "lora_wt_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "lora_name_3": (cls.loras,),
+            "lora_wt_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})},
+            "optional": {"lora_stack": ("LORA_STACK",)},
+        }
+
+    RETURN_TYPES = ("LORA_STACK",)
+    RETURN_NAMES = ("LORA_STACK",)
+    FUNCTION = "lora_stacker"
+    CATEGORY = "Efficiency Nodes/Misc"
+
+    def lora_stacker(self, lora_name_1, lora_wt_1, lora_name_2, lora_wt_2, lora_name_3, lora_wt_3, lora_stack=None):
+        # Create a list of tuples using provided parameters, exclude tuples with lora_name as "None"
+        loras = [(lora_name, lora_wt, lora_wt) for lora_name, lora_wt, lora_wt in
+                 [(lora_name_1, lora_wt_1, lora_wt_1),
+                  (lora_name_2, lora_wt_2, lora_wt_2),
+                  (lora_name_3, lora_wt_3, lora_wt_3)]
+                 if lora_name != "None"]
+
+        # If lora_stack is not None, extend the loras list with lora_stack
+        if lora_stack is not None:
+            loras.extend([l for l in lora_stack if l[0] != "None"])
+
+        return (loras,)
+
+# TSC LoRA Stacker Advanced
+class TSC_LoRA_Stacker_Adv:
+
+    loras = ["None"] + folder_paths.get_filename_list("loras")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "lora_name_1": (cls.loras,),
+            "model_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "clip_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "lora_name_2": (cls.loras,),
+            "model_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "clip_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "lora_name_3": (cls.loras,),
+            "model_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "clip_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})},
+            "optional": {"lora_stack": ("LORA_STACK",)},
+        }
+
+    RETURN_TYPES = ("LORA_STACK",)
+    RETURN_NAMES = ("LORA_STACK",)
+    FUNCTION = "lora_stacker"
+    CATEGORY = "Efficiency Nodes/Misc"
+
+    def lora_stacker(self, lora_name_1, model_str_1, clip_str_1, lora_name_2, model_str_2, clip_str_2,
+                     lora_name_3, model_str_3, clip_str_3, lora_stack=None):
+        # Create a list of tuples using provided parameters, exclude tuples with lora_name as "None"
+        loras = [(lora_name, model_str, clip_str) for lora_name, model_str, clip_str in
+                 [(lora_name_1, model_str_1, clip_str_1),
+                  (lora_name_2, model_str_2, clip_str_2),
+                  (lora_name_3, model_str_3, clip_str_3)]
+                 if lora_name != "None"]
+
+        # If lora_stack is not None, extend the loras list with lora_stack
+        if lora_stack is not None:
+            loras.extend([l for l in lora_stack if l[0] != "None"])
+
+        return (loras,)
+
+########################################################################################################################
 # TSC KSampler (Efficient)
-last_helds: dict[str, list] = {
-    "results": [],      # (results, id) # Preview Images, stored as a pil image list
-    "latent": [],       # (latent, id)  # Latent outputs, stored as a latent tensor list
-    "images": [],       # (images, id)  # Image outputs, stored as an image tensor list
-    "vae_decode": [],   # (vae_decode, id) # Used to track wether to vae-decode or not
-}
-
-def print_last_helds(id=None):
-    print("\n" + "-" * 40)  # Print an empty line followed by a separator line
-    if id is not None:
-        id = str(id)  # Convert ID to string
-        print(f"Node-specific Last Helds (node_id:{int(id)})")
-    else:
-        print(f"Global Last Helds:")
-    for key in ["results", "latent", "images", "vae_decode"]:
-        entries_with_id = last_helds[key] if id is None else [entry for entry in last_helds[key] if id == entry[-1]]
-        if not entries_with_id:  # If no entries with the chosen ID, print None and skip this key
-            continue
-        print(f"{key.capitalize()}:")
-        for i, entry in enumerate(entries_with_id, 1):  # Start numbering from 1
-            if isinstance(entry[0], bool):  # Special handling for boolean types
-                output = entry[0]
-            else:
-                output = len(entry[0])
-            if id is None:
-                print(f"  [{i}] Output: {output} (id: {entry[-1]})")
-            else:
-                print(f"  [{i}] Output: {output}")
-    print("-" * 40)  # Print a separator line
-    print("\n")  # Print an empty line
-
 class TSC_KSampler:
     
     empty_image = pil2tensor(Image.new('RGBA', (1, 1), (0, 0, 0, 0)))
@@ -791,24 +487,24 @@ class TSC_KSampler:
                 vae_name = None
                 ckpt_name = None
                 clip = None
-                lora_name = None
-                lora_model_wt = None
-                lora_clip_wt = None
+                lora_params = None
                 positive_prompt = None
                 negative_prompt = None
                 clip_skip = None
 
                 # Unpack script Tuple (X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, dependencies)
-                X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models, xyplot_as_output_image, dependencies = script
+                X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models, xyplot_as_output_image,\
+                    flip_xy, dependencies = script
 
                 # Unpack Effficient Loader dependencies
                 if dependencies is not None:
-                    vae_name, ckpt_name, clip, clip_skip, positive_prompt, negative_prompt,\
-                        lora_name, lora_model_wt, lora_clip_wt = dependencies
+                    vae_name, ckpt_name, clip, clip_skip, positive_prompt, negative_prompt, lora_params = dependencies
 
                 # Helper function to process printout values
-                def process_xy_for_print(value, replacement):
-                    if isinstance(value, tuple):
+                def process_xy_for_print(value, replacement, type_):
+                    if isinstance(value, tuple) and type_ == "Scheduler":
+                        return value[0]  # Return only the first entry of the tuple
+                    elif isinstance(value, tuple):
                         return tuple(replacement if v is None else v for v in value)
                     else:
                         return replacement if value is None else value
@@ -818,8 +514,8 @@ class TSC_KSampler:
                 replacement_Y = scheduler if Y_type == 'Sampler' else clip_skip if Y_type == 'Checkpoint' else None
 
                 # Process X_value and Y_value
-                X_value_processed = [process_xy_for_print(v, replacement_X) for v in X_value]
-                Y_value_processed = [process_xy_for_print(v, replacement_Y) for v in Y_value]
+                X_value_processed = [process_xy_for_print(v, replacement_X, X_type) for v in X_value]
+                Y_value_processed = [process_xy_for_print(v, replacement_Y, Y_type) for v in Y_value]
 
                 # Print XY Plot Inputs
                 print("-" * 40)
@@ -841,41 +537,6 @@ class TSC_KSampler:
                 positive_prompt = (positive_prompt, positive_prompt)
                 negative_prompt = (negative_prompt, negative_prompt)
 
-                # Define X/Y_values for "Seeds++ Batch"
-                if X_type == "Seeds++ Batch":
-                    X_value = [i for i in range(X_value[0])]
-                if Y_type == "Seeds++ Batch":
-                    Y_value = [i for i in range(Y_value[0])]
-
-                # Embedd information into "Scheduler" X/Y_values for text label
-                if X_type == "Scheduler" and Y_type != "Sampler":
-                    # X_value second list value of each array entry = None
-                    for i in range(len(X_value)):
-                        if len(X_value[i]) == 2:
-                            X_value[i][1] = None
-                        else:
-                            X_value[i] = [X_value[i], None]
-                if Y_type == "Scheduler" and X_type != "Sampler":
-                    # Y_value second list value of each array entry = None
-                    for i in range(len(Y_value)):
-                        if len(Y_value[i]) == 2:
-                            Y_value[i][1] = None
-                        else:
-                            Y_value[i] = [Y_value[i], None]
-
-                # Optimize image generation by prioritizing Checkpoint>LoRA>VAE>PromptSR as X in For Loop. Flip back when done.
-                if Y_type == "Checkpoint" or \
-                        Y_type == "LoRA" and X_type not in {"Checkpoint"} or \
-                        Y_type == "VAE" and X_type not in {"Checkpoint", "LoRA"} or \
-                        Y_type == "Positive Prompt S/R" and X_type not in {"Checkpoint", "LoRA", "VAE", "Negative Prompt S/R"} or \
-                        Y_type == "Negative Prompt S/R" and X_type not in {"Checkpoint", "LoRA", "VAE", "Positive Prompt S/R"} or \
-                        X_type == "Nothing" and Y_type != "Nothing":
-                    flip_xy = True
-                    X_type, Y_type = Y_type, X_type
-                    X_value, Y_value = Y_value, X_value
-                else:
-                    flip_xy = False
-
                 #_______________________________________________________________________________________________________
                 #The below code will clean from the cache any ckpt/vae/lora models it will not be reusing.
 
@@ -888,21 +549,22 @@ class TSC_KSampler:
                 # Iterate over type-value pairs
                 for t, v in type_value_pairs:
                     if t in dict_map:
-                        dict_map[t] = v
+                        # Flatten the list of lists of tuples if the type is "LoRA"
+                        if t == "LoRA":
+                            dict_map[t] = [item for sublist in v for item in sublist]
+                        else:
+                            dict_map[t] = v
 
                 ckpt_dict = [t[0] for t in dict_map.get("Checkpoint", [])] if dict_map.get("Checkpoint", []) else []
 
-                lora_dict = [t for t in dict_map.get("LoRA", [])] if dict_map.get("LoRA", []) else []
+                lora_dict = [[t,] for t in dict_map.get("LoRA", [])] if dict_map.get("LoRA", []) else []
 
                 # If both ckpt_dict and lora_dict are not empty, manipulate lora_dict as described
                 if ckpt_dict and lora_dict:
-                    lora_dict = [(lora_name, ckpt, lora_model_wt, lora_clip_wt) for ckpt in ckpt_dict for
-                                 lora_name, lora_model_wt, lora_clip_wt in lora_dict]
+                    lora_dict = [(lora_params, ckpt) for ckpt in ckpt_dict for lora_params in lora_dict]
                 # If lora_dict is not empty and ckpt_dict is empty, insert ckpt_name into each tuple in lora_dict
                 elif lora_dict:
-                    lora_dict = [(lora_name, ckpt_name, lora_model_wt, lora_clip_wt) for
-                                 lora_name, lora_model_wt, lora_clip_wt in
-                                 lora_dict]
+                    lora_dict = [(lora_params, ckpt_name) for lora_params in lora_dict]
 
                 vae_dict = dict_map.get("VAE", [])
 
@@ -918,11 +580,16 @@ class TSC_KSampler:
                 # Clean values that won't be reused
                 clear_cache_by_exception(script_node_id, vae_dict=vae_dict, ckpt_dict=ckpt_dict, lora_dict=lora_dict)
 
+                # Print loaded_objects for debugging
+                ###print_loaded_objects_entries()
+
                 #_______________________________________________________________________________________________________
                 # Function that changes appropiate variables for next processed generations (also generates XY_labels)
                 def define_variable(var_type, var, seed, steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                    clip_skip, positive_prompt, negative_prompt, lora_name, lora_model_wt, lora_clip_wt,
-                                    var_label, num_label):
+                                    clip_skip, positive_prompt, negative_prompt, lora_params, var_label, num_label):
+
+                    # Define default max label size limit
+                    max_label_len = 36
 
                     # If var_type is "Seeds++ Batch", update var and seed, and generate labels
                     if var_type == "Seeds++ Batch":
@@ -949,16 +616,17 @@ class TSC_KSampler:
                             else:
                                 scheduler = (scheduler[1], scheduler[1])
                             text = f"{sampler_name} ({scheduler[0]})"
-                        text = text.replace("ancestral", "a").replace("uniform", "u")
+                        text = text.replace("ancestral", "a").replace("uniform", "u").replace("exponential","exp")
 
                     # If var_type is "Scheduler", update scheduler and generate labels
                     elif var_type == "Scheduler":
-                        scheduler = (var[0], scheduler[1])
                         if len(var) == 2:
+                            scheduler = (var[0], scheduler[1])
                             text = f"{sampler_name} ({scheduler[0]})"
                         else:
-                            text = f"{var}"
-                        text = text.replace("ancestral", "a").replace("uniform", "u")
+                            scheduler = (var, scheduler[1])
+                            text = f"{scheduler[0]}"
+                        text = text.replace("ancestral", "a").replace("uniform", "u").replace("exponential","exp")
 
                     # If var_type is "Denoise", update denoise and generate labels
                     elif var_type == "Denoise":
@@ -968,7 +636,7 @@ class TSC_KSampler:
                     # If var_type is "VAE", update vae_name and generate labels
                     elif var_type == "VAE":
                         vae_name = var
-                        vae_filename = os.path.basename(vae_name)
+                        vae_filename = os.path.splitext(os.path.basename(vae_name))[0]
                         text = f"VAE: {vae_filename}"
 
                     # If var_type is "Positive Prompt S/R", update positive_prompt and generate labels
@@ -998,44 +666,42 @@ class TSC_KSampler:
                             clip_skip = (clip_skip[1],clip_skip[1])
                         else:
                             clip_skip = (var[1],clip_skip[1])
-                        ckpt_filename = os.path.basename(ckpt_name)
+                        ckpt_filename = os.path.splitext(os.path.basename(ckpt_name))[0]
                         text = f"{ckpt_filename}"
-                        #text = f"{ckpt_filename[:16]}... ({clip_skip[0]})" if len(
-                            #ckpt_filename) > 16 else f"{ckpt_filename} ({clip_skip[0]})"
 
                     elif var_type == "Clip Skip":
                         clip_skip = (var, clip_skip[1])
                         text = f"Clip Skip ({clip_skip[0]})"
 
-                    # If var_type is "LoRA", update lora_model and lora_clip (if needed) and generate labels
                     elif var_type == "LoRA":
-                        lora_name = var[0]
-                        lora_model_wt = var[1]
-                        lora_clip_wt = var[2]
-                        lora_filename = os.path.basename(lora_name)
-                        if lora_model_wt == lora_clip_wt:
-                            text = f"<{round(lora_model_wt, 2)}> {lora_filename}"
-                        else:
-                            text = f"<{round(lora_model_wt, 2)},{round(lora_clip_wt, 2)}> {lora_filename}"
+                        lora_params = var
+                        max_label_len = 30 + (12 * (len(lora_params)-1))
+                        if len(lora_params) == 1:
+                            lora_name, lora_model_wt, lora_clip_wt = lora_params[0]
+                            lora_filename = os.path.splitext(os.path.basename(lora_name))[0]
+                            lora_model_wt = format(float(lora_model_wt), ".2f").rstrip('0').rstrip('.')
+                            lora_clip_wt = format(float(lora_clip_wt), ".2f").rstrip('0').rstrip('.')
+                            lora_filename = lora_filename[:max_label_len - len(f"LoRA: ({lora_model_wt})")]
+                            if lora_model_wt == lora_clip_wt:
+                                text = f"LoRA: {lora_filename}({lora_model_wt})"
+                            else:
+                                text = f"LoRA: {lora_filename}({lora_model_wt},{lora_clip_wt})"
+                        elif len(lora_params) > 1:
+                            lora_filenames = [os.path.splitext(os.path.basename(lora_name))[0] for lora_name, _, _ in lora_params]
+                            lora_details = [(format(float(lora_model_wt), ".2f").rstrip('0').rstrip('.'),
+                                             format(float(lora_clip_wt), ".2f").rstrip('0').rstrip('.')) for _, lora_model_wt, lora_clip_wt in lora_params]
+                            non_name_length = sum(len(f"({lora_details[i][0]},{lora_details[i][1]})") + 2 for i in range(len(lora_params)))
+                            available_space = max_label_len - non_name_length
+                            max_name_length = available_space // len(lora_params)
+                            lora_filenames = [filename[:max_name_length] for filename in lora_filenames]
+                            text_elements = [f"{lora_filename}({lora_details[i][0]})" if lora_details[i][0] == lora_details[i][1] else f"{lora_filename}({lora_details[i][0]},{lora_details[i][1]})" for i, lora_filename in enumerate(lora_filenames)]
+                            text = " ".join(text_elements)
 
-                    # For any other var_type, set text to ""
-                    else:
-                        text = ""
+                    def truncate_texts(texts, num_label, max_label_len):
+                        truncate_length = max(min(max(len(text) for text in texts), max_label_len), 24)
 
-                    def truncate_texts(texts, num_label):
-                        min_length = min([len(text) for text in texts])
-                        truncate_length = min(min_length, 24)
-
-                        if truncate_length < 16:
-                            truncate_length = 16
-
-                        truncated_texts = []
-                        for text in texts:
-                            if len(text) > truncate_length:
-                                text = text[:truncate_length] + "..."
-                            truncated_texts.append(text)
-
-                        return truncated_texts
+                        return [text if len(text) <= truncate_length else text[:truncate_length] + "..." for text in
+                                texts]
 
                     # Add the generated text to var_label if it's not full
                     if len(var_label) < num_label:
@@ -1043,16 +709,16 @@ class TSC_KSampler:
 
                     # If var_type VAE , truncate entries in the var_label list when it's full
                     if len(var_label) == num_label and (var_type == "VAE" or var_type == "Checkpoint" or var_type == "LoRA"):
-                        var_label = truncate_texts(var_label, num_label)
+                        var_label = truncate_texts(var_label, num_label, max_label_len)
 
                     # Return the modified variables
                     return steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, \
-                        positive_prompt, negative_prompt, lora_name, lora_model_wt, lora_clip_wt, var_label
+                        positive_prompt, negative_prompt, lora_params, var_label
 
                 # _______________________________________________________________________________________________________
                 # The function below is used to smartly load Checkpoint/LoRA/VAE models between generations.
                 def define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip, vae,
-                                 vae_name, ckpt_name, lora_name, lora_model_wt, lora_clip_wt, index, types, script_node_id, cache):
+                                 vae_name, ckpt_name, lora_params, index, types, script_node_id, cache):
         
                     # Encode prompt and apply clip_skip. Return new conditioning.
                     def encode_prompt(positive_prompt, negative_prompt, clip, clip_skip):
@@ -1073,21 +739,21 @@ class TSC_KSampler:
 
                     # Load Checkpoint if required. If Y_type is LoRA, required models will be loaded by load_lora func.
                     if (X_type == "Checkpoint" and index == 0 and Y_type != "LoRA"):
-                        if lora_name is None:
-                            model, clip, _ = load_checkpoint(ckpt_name, script_node_id, False, cache=cache[1])
+                        if lora_params is None:
+                            model, clip, _ = load_checkpoint(ckpt_name, script_node_id, output_vae=False, cache=cache[1])
                         else: # Load Efficient Loader LoRA
-                            model, clip = load_lora(lora_name, ckpt_name, lora_model_wt, lora_clip_wt, script_node_id,
+                            model, clip = load_lora(lora_params, ckpt_name, script_node_id,
                                                     cache=None, ckpt_cache=cache[1])
                         encode = True
 
                     # Load LoRA if required
                     elif (X_type == "LoRA" and index == 0):
                         # Don't cache Checkpoints
-                        model, clip = load_lora(lora_name, ckpt_name, lora_model_wt, lora_clip_wt, script_node_id, cache=cache[2])
+                        model, clip = load_lora(lora_params, ckpt_name, script_node_id, cache=cache[2])
                         encode = True
                         
                     elif Y_type == "LoRA":  # X_type must be Checkpoint, so cache those as defined
-                        model, clip = load_lora(lora_name, ckpt_name, lora_model_wt, lora_clip_wt, script_node_id,
+                        model, clip = load_lora(lora_params, ckpt_name, script_node_id,
                                                 cache=None, ckpt_cache=cache[1])
                         encode = True
 
@@ -1161,17 +827,16 @@ class TSC_KSampler:
 
                     # Define X parameters and generate labels
                     steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, positive_prompt, negative_prompt, \
-                        lora_name, lora_model_wt, lora_clip_wt, X_label = \
+                        lora_params, X_label = \
                         define_variable(X_type, X, seed_updated, steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                        clip_skip, positive_prompt, negative_prompt, lora_name, lora_model_wt, lora_clip_wt,
-                                        X_label, len(X_value))
+                                        clip_skip, positive_prompt, negative_prompt, lora_params, X_label, len(X_value))
 
                     if X_type != "Nothing" and Y_type == "Nothing":
 
                         # Models & Conditionings
                         model, positive, negative , vae = \
                             define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip[0], vae,
-                                         vae_name, ckpt_name, lora_name, lora_model_wt, lora_clip_wt, 0, types, script_node_id, cache)
+                                         vae_name, ckpt_name, lora_params, 0, types, script_node_id, cache)
 
                         # Generate Results
                         latent_list, image_tensor_list, image_pil_list = \
@@ -1187,16 +852,14 @@ class TSC_KSampler:
                                 seed_updated = seed + Y_index
 
                             # Define Y parameters and generate labels
-                            steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, positive_prompt, negative_prompt, \
-                                lora_name, lora_model_wt, lora_clip_wt, Y_label = \
+                            steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, positive_prompt, negative_prompt, lora_params, Y_label = \
                                 define_variable(Y_type, Y, seed_updated, steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                                clip_skip, positive_prompt, negative_prompt, lora_name, lora_model_wt, lora_clip_wt,
-                                                Y_label, len(Y_value))
+                                                clip_skip, positive_prompt, negative_prompt, lora_params, Y_label, len(Y_value))
 
                             # Models & Conditionings
                             model, positive, negative, vae = \
-                            define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip[0], vae,
-                                         vae_name, ckpt_name, lora_name, lora_model_wt, lora_clip_wt, Y_index, types, script_node_id, cache)
+                                define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip[0], vae,
+                                         vae_name, ckpt_name, lora_params, Y_index, types, script_node_id, cache)
 
                             # Generate Results
                             latent_list, image_tensor_list, image_pil_list = \
@@ -1215,39 +878,70 @@ class TSC_KSampler:
                         clear_cache_by_exception(script_node_id, lora_dict=[])
 
                 # ______________________________________________________________________________________________________
-                def print_plot_variables(X_type, Y_type, X_value, Y_value, seed, ckpt_name, lora_name, lora_model_wt, lora_clip_wt,
+                def print_plot_variables(X_type, Y_type, X_value, Y_value, seed, ckpt_name, lora_params,
                                          vae_name, clip_skip, steps, cfg, sampler_name, scheduler, denoise,
                                          num_rows, num_cols, latent_height, latent_width):
 
                     print("-" * 40)  # Print an empty line followed by a separator line
                     print("\033[32mXY Plot Results:\033[0m")
 
-                    if X_type == "Checkpoint":
-                        if Y_type == "Clip Skip":
-                            ckpt_name = ", ".join([os.path.basename(str(x[0])) for x in X_value]) if X_type == "Checkpoint" else ckpt_name
+                    def get_vae_name(X_type, Y_type, X_value, Y_value, vae_name):
+                        if X_type == "VAE":
+                            vae_name = ", ".join(map(lambda x: os.path.splitext(os.path.basename(str(x)))[0], X_value))
+                        elif Y_type == "VAE":
+                            vae_name = ", ".join(map(lambda y: os.path.splitext(os.path.basename(str(y)))[0], Y_value))
                         else:
-                            ckpt_name = ", ".join([f"{os.path.basename(str(x[0]))}({str(x[1]) if x[1] is not None else str(clip_skip[1])})"
-                                                   for x in X_value]) if X_type == "Checkpoint" else ckpt_name
-                            clip_skip = "_"
+                            vae_name = os.path.splitext(os.path.basename(str(vae_name)))[0]
+                        return vae_name
+                    
+                    def get_clip_skip(X_type, Y_type, X_value, Y_value, clip_skip):
+                        if X_type == "Clip Skip":
+                            clip_skip = ", ".join(map(str, X_value))
+                        elif Y_type == "Clip Skip":
+                            clip_skip = ", ".join(map(str, Y_value))
+                        else:
+                            clip_skip = clip_skip[1]
+                        return clip_skip
 
-                    clip_skip = ", ".join(map(str, X_value)) if X_type == "Clip Skip" else ", ".join(
-                        map(str, Y_value)) if Y_type == "Clip Skip" else clip_skip
+                    def get_checkpoint_name(ckpt_type, ckpt_values, clip_skip_type, clip_skip_values, ckpt_name, clip_skip):
+                        if ckpt_type == "Checkpoint":
+                            if clip_skip_type == "Clip Skip":
+                                ckpt_name = ", ".join([os.path.splitext(os.path.basename(str(ckpt[0])))[0] for ckpt in ckpt_values])
+                            else:
+                                ckpt_name = ", ".join([f"{os.path.splitext(os.path.basename(str(ckpt[0])))[0]}({str(ckpt[1]) if ckpt[1] is not None else str(clip_skip_values)})"
+                                                          for ckpt in ckpt_values])
+                                clip_skip = "_"
+                        else:
+                            ckpt_name = os.path.splitext(os.path.basename(str(ckpt_name)))[0]
 
-                    if X_type != "LoRA" and Y_type != "LoRA":
-                        if lora_name:
-                            lora_name = f"{os.path.basename(lora_name)}({lora_model_wt},{lora_clip_wt})"
-                    else:
-                        lora_name = ", ".join([f"{os.path.basename(str(x[0]))}({str(x[1])},{str(x[2])})" for x in X_value])\
-                            if X_type == "LoRA" else ", ".join([f"{os.path.basename(str(y[0]))}({str(y[1])},{str(y[2])})"
-                                                                for y in Y_value]) if Y_type == "LoRA" else lora_name
+                        return ckpt_name, clip_skip
 
-                    vae_name = ", ".join(
-                        map(lambda x: os.path.basename(str(x)), X_value)) if X_type == "VAE" else ", ".join(
-                        map(lambda y: os.path.basename(str(y)), Y_value)) if Y_type == "VAE" else vae_name
+                    def get_lora_name(X_type, Y_type, X_value, Y_value, lora_params=None):
+                        if X_type != "LoRA" and Y_type != "LoRA":
+                            if lora_params:
+                                return f"[{', '.join([f'{os.path.splitext(os.path.basename(name))[0]}({round(model_wt, 3)},{round(clip_wt, 3)})' for name, model_wt, clip_wt in lora_params])}]"
+                            else:
+                                return None
+                        else:
+                            return get_lora_sublist_name(X_type,
+                                                         X_value) if X_type == "LoRA" else get_lora_sublist_name(Y_type, Y_value) if Y_type == "LoRA" else None
 
-                    seed_list = [seed + x for x in X_value] if X_type == "Seeds++ Batch" else [seed + y for y in
-                                                                                               Y_value] if Y_type == "Seeds++ Batch" else [
-                        seed]
+                    def get_lora_sublist_name(lora_type, lora_value):
+                        return ", ".join([
+                                             f"[{', '.join([f'{os.path.splitext(os.path.basename(str(x[0])))[0]}({round(x[1], 3)},{round(x[2], 3)})' for x in sublist])}]"
+                                             for sublist in lora_value])
+
+                    # use these functions:
+                    ckpt_type, clip_skip_type = (X_type, Y_type) if X_type in ["Checkpoint", "Clip Skip"] else (Y_type, X_type)
+                    ckpt_values, clip_skip_values = (X_value, Y_value) if X_type in ["Checkpoint", "Clip Skip"] else (Y_value, X_value)
+
+                    clip_skip = get_clip_skip(X_type, Y_type, X_value, Y_value, clip_skip)
+                    ckpt_name, clip_skip = get_checkpoint_name(ckpt_type, ckpt_values, clip_skip_type, clip_skip_values, ckpt_name, clip_skip)
+                    vae_name = get_vae_name(X_type, Y_type, X_value, Y_value, vae_name)
+                    lora_name = get_lora_name(X_type, Y_type, X_value, Y_value, lora_params)
+
+                    seed_list = [seed + x for x in X_value] if X_type == "Seeds++ Batch" else\
+                        [seed + y for y in Y_value] if Y_type == "Seeds++ Batch" else [seed]
                     seed = ", ".join(map(str, seed_list))
 
                     steps = ", ".join(map(str, X_value)) if X_type == "Steps" else ", ".join(
@@ -1257,17 +951,24 @@ class TSC_KSampler:
                         map(str, Y_value)) if Y_type == "CFG Scale" else cfg
 
                     if X_type == "Sampler":
-                        sampler_name = ", ".join([f"{x[0]}({x[1] if x[1] is not None else scheduler[1]})" for x in X_value])
-                        scheduler = "_"
+                        if Y_type == "Scheduler":
+                            sampler_name = ", ".join([f"{x[0]}" for x in X_value])
+                            scheduler = ", ".join([f"{y}" for y in Y_value])
+                        else:
+                            sampler_name = ", ".join(
+                                [f"{x[0]}({x[1] if x[1] != '' and x[1] is not None else scheduler[1]})" for x in X_value])
+                            scheduler = "_"
                     elif Y_type == "Sampler":
-                        sampler_name = ", ".join([f"{y[0]}({y[1] if y[1] is not None else scheduler[1]})" for y in Y_value])
-                        scheduler = "_"
-
-                    scheduler = ", ".join([str(x[0]) for x in X_value]) if X_type == "Scheduler" else ", ".join(
-                        [str(y[0]) for y in Y_value]) if Y_type == "Scheduler" else scheduler
-
-                    if isinstance(scheduler, tuple):
-                        scheduler = scheduler[0]
+                        if X_type == "Scheduler":
+                            sampler_name = ", ".join([f"{y[0]}" for y in Y_value])
+                            scheduler = ", ".join([f"{x}" for x in X_value])
+                        else:
+                            sampler_name = ", ".join(
+                                [f"{y[0]}({y[1] if y[1] != '' and y[1] is not None else scheduler[1]})" for y in Y_value])
+                            scheduler = "_"
+                    else:
+                        scheduler = ", ".join([str(x[0]) if isinstance(x, tuple) else str(x) for x in X_value]) if X_type == "Scheduler" else \
+                            ", ".join([str(y[0]) if isinstance(y, tuple) else str(y) for y in Y_value]) if Y_type == "Scheduler" else scheduler[0]
 
                     denoise = ", ".join(map(str, X_value)) if X_type == "Denoise" else ", ".join(
                         map(str, Y_value)) if Y_type == "Denoise" else denoise
@@ -1280,7 +981,7 @@ class TSC_KSampler:
                         print(f"ckpt(clipskip): {ckpt_name if ckpt_name is not None else ''}")
                     else:
                         print(f"ckpt: {ckpt_name if ckpt_name is not None else ''}")
-                        print(f"clip_skip: {clip_skip[1] if clip_skip is not None else ''}")
+                        print(f"clip_skip: {clip_skip if clip_skip is not None else ''}")
                     if lora_name:
                         print(f"lora(mod,clip): {lora_name if lora_name is not None else ''}")
                     print(f"vae: {vae_name if vae_name is not None else ''}")
@@ -1359,8 +1060,8 @@ class TSC_KSampler:
                     latent_list = rearrange_list_A(latent_list, num_cols, num_rows)
 
                 # Print XY Plot Results
-                print_plot_variables(X_type, Y_type, X_value, Y_value, seed, ckpt_name, lora_name, lora_model_wt, lora_clip_wt,
-                                     vae_name, clip_skip, steps, cfg, sampler_name, scheduler, denoise,
+                print_plot_variables(X_type, Y_type, X_value, Y_value, seed, ckpt_name, lora_params, vae_name,
+                                     clip_skip, steps, cfg, sampler_name, scheduler, denoise,
                                      num_rows, num_cols, latent_height, latent_width)
 
                 # Concatenate the tensors along the first dimension (dim=0)
@@ -1547,9 +1248,11 @@ class TSC_XYplot:
                     "Y_label_orientation": (["Horizontal", "Vertical"],),
                     "cache_models": (["True", "False"],),
                     "ksampler_output_image": (["Plot", "Images"],),},
-                "optional": {"dependencies": ("DEPENDENCIES", ),
-                             "X": ("XY", ),
-                             "Y": ("XY", ),},}
+                "optional": {
+                    "dependencies": ("DEPENDENCIES", ),
+                    "X": ("XY", ),
+                    "Y": ("XY", ),},
+        }
 
     RETURN_TYPES = ("SCRIPT",)
     RETURN_NAMES = ("SCRIPT",)
@@ -1574,15 +1277,6 @@ class TSC_XYplot:
         if (X_type == Y_type):
             if X_type != "Nothing":
                 print(f"\033[31mXY Plot Error:\033[0m X and Y input types must be different.")
-            '''
-            else:
-                # Print XY Plot Inputs
-                print("-" * 40)
-                print("XY Plot Script Inputs:")
-                print(f"(X) {X_type}: {X_value}")
-                print(f"(Y) {Y_type}: {Y_value}")
-                print("-" * 40)
-            '''
             return (None,)
 
         # Check that dependencies is connected for Checkpoint and LoRA plots
@@ -1593,13 +1287,43 @@ class TSC_XYplot:
                 # Return None
                 return (None,)
 
+        # Define X/Y_values for "Seeds++ Batch"
+        if X_type == "Seeds++ Batch":
+            X_value = [i for i in range(X_value[0])]
+        if Y_type == "Seeds++ Batch":
+            Y_value = [i for i in range(Y_value[0])]
+
         # Clean Schedulers from Sampler data (if other type is Scheduler)
         if X_type == "Sampler" and Y_type == "Scheduler":
             # Clear X_value Scheduler's
-            X_value = [[x[0], ""] for x in X_value]
+            X_value = [(x[0], "") for x in X_value]
         elif Y_type == "Sampler" and X_type == "Scheduler":
             # Clear Y_value Scheduler's
-            Y_value = [[y[0], ""] for y in Y_value]
+            Y_value = [(y[0], "") for y in Y_value]
+
+        # Embed information into "Scheduler" X/Y_values for text label
+        if X_type == "Scheduler" and Y_type != "Sampler":
+            # X_value second tuple value of each array entry = None
+            X_value = [(x, None) for x in X_value]
+
+        if Y_type == "Scheduler" and X_type != "Sampler":
+            # Y_value second tuple value of each array entry = None
+            Y_value = [(y, None) for y in Y_value]
+
+        # Optimize image generation by prioritizing Checkpoint>LoRA>VAE>PromptSR as X in For Loop. Flip back when done.
+        if Y_type == "Checkpoint" or \
+                Y_type == "LoRA" and X_type not in {"Checkpoint"} or \
+                Y_type == "VAE" and X_type not in {"Checkpoint", "LoRA"} or \
+                Y_type == "Positive Prompt S/R" and X_type not in {"Checkpoint", "LoRA", "VAE",
+                                                                   "Negative Prompt S/R"} or \
+                Y_type == "Negative Prompt S/R" and X_type not in {"Checkpoint", "LoRA", "VAE",
+                                                                   "Positive Prompt S/R"} or \
+                X_type == "Nothing" and Y_type != "Nothing":
+            flip_xy = True
+            X_type, Y_type = Y_type, X_type
+            X_value, Y_value = Y_value, X_value
+        else:
+            flip_xy = False
 
         # Flip X and Y
         if XY_flip == "True":
@@ -1610,7 +1334,7 @@ class TSC_XYplot:
         xyplot_as_output_image = ksampler_output_image == "Plot"
 
         return ((X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models,
-                 xyplot_as_output_image, dependencies),)
+                 xyplot_as_output_image, flip_xy, dependencies),)
 
 
 # TSC XY Plot: Seeds Values
@@ -1640,7 +1364,7 @@ class TSC_XYplot_Steps:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "selection_count": ("INT", {"default": 0, "min": 0, "max": 5}),
+            "select_count": ("INT", {"default": 0, "min": 0, "max": 5}),
             "steps_1": ("INT", {"default": 20, "min": 1, "max": 10000}),
             "steps_2": ("INT", {"default": 20, "min": 1, "max": 10000}),
             "steps_3": ("INT", {"default": 20, "min": 1, "max": 10000}),
@@ -1653,10 +1377,10 @@ class TSC_XYplot_Steps:
     FUNCTION = "xy_value"
     CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
 
-    def xy_value(self, selection_count, steps_1, steps_2, steps_3, steps_4, steps_5):
+    def xy_value(self, select_count, steps_1, steps_2, steps_3, steps_4, steps_5):
         xy_type = "Steps"
         xy_value = [step for idx, step in enumerate([steps_1, steps_2, steps_3, steps_4, steps_5], start=1) if
-                 idx <= selection_count]
+                 idx <= select_count]
         if not xy_value:  # Check if the list is empty
             return (None,)
         return ((xy_type, xy_value),)
@@ -1668,7 +1392,7 @@ class TSC_XYplot_CFG:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "selection_count": ("INT", {"default": 0, "min": 0, "max": 5}),
+            "select_count": ("INT", {"default": 0, "min": 0, "max": 5}),
             "cfg_1": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
             "cfg_2": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
             "cfg_3": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
@@ -1681,9 +1405,9 @@ class TSC_XYplot_CFG:
     FUNCTION = "xy_value"
     CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
 
-    def xy_value(self, selection_count, cfg_1, cfg_2, cfg_3, cfg_4, cfg_5):
+    def xy_value(self, select_count, cfg_1, cfg_2, cfg_3, cfg_4, cfg_5):
         xy_type = "CFG Scale"
-        xy_value = [cfg for idx, cfg in enumerate([cfg_1, cfg_2, cfg_3, cfg_4, cfg_5], start=1) if idx <= selection_count]
+        xy_value = [cfg for idx, cfg in enumerate([cfg_1, cfg_2, cfg_3, cfg_4, cfg_5], start=1) if idx <= select_count]
         if not xy_value:  # Check if the list is empty
             return (None,)
         return ((xy_type, xy_value),)
@@ -1819,7 +1543,8 @@ class TSC_XYplot_VAE:
             return (None,)
         return ((xy_type, xy_value),)
 
-# TSC XY Plot: Prompt S/R
+
+# TSC XY Plot: Prompt S/R Positive
 class TSC_XYplot_PromptSR_Positive:
 
     @classmethod
@@ -1857,6 +1582,7 @@ class TSC_XYplot_PromptSR_Positive:
 
         return ((xy_type, xy_values),)
 
+# TSC XY Plot: Prompt S/R Negative
 class TSC_XYplot_PromptSR_Negative:
 
     @classmethod
@@ -1965,27 +1691,34 @@ class TSC_XYplot_LoRA:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "model_strengths": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "clip_strengths": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "lora_name_1": (cls.loras,),
-            "lora_name_2": (cls.loras,),
-            "lora_name_3": (cls.loras,),
-            "lora_name_4": (cls.loras,),
-            "lora_name_5": (cls.loras,),},
-        }
+                            "model_strengths": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                            "clip_strengths": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                            "lora_name_1": (cls.loras,),
+                            "lora_name_2": (cls.loras,),
+                            "lora_name_3": (cls.loras,),
+                            "lora_name_4": (cls.loras,),
+                            "lora_name_5": (cls.loras,)},
+                "optional": {"lora_stack": ("LORA_STACK", )}
+                }
 
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
     CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
 
-    def xy_value(self, model_strengths, clip_strengths, lora_name_1, lora_name_2, lora_name_3, lora_name_4, lora_name_5):
+    def xy_value(self, model_strengths, clip_strengths, lora_name_1, lora_name_2, lora_name_3, lora_name_4, lora_name_5,
+                 lora_stack=None):
         xy_type = "LoRA"
         loras = [lora_name_1, lora_name_2, lora_name_3, lora_name_4, lora_name_5]
-        xy_value = [(lora, model_strengths, clip_strengths) for lora in loras if lora != "None"]
+
+        # Extend each sub-array with lora_stack if it's not None
+        xy_value = [[(lora, model_strengths, clip_strengths)] + (lora_stack if lora_stack else []) for lora in loras if
+                    lora != "None"]
+
         if not xy_value:  # Check if the list is empty
             return (None,)
         return ((xy_type, xy_value),)
+
 
 # TSC XY Plot: LoRA Advanced
 class TSC_XYplot_LoRA_Adv:
@@ -1995,21 +1728,22 @@ class TSC_XYplot_LoRA_Adv:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "lora_name_1": (cls.loras,),
-            "model_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "clip_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "lora_name_2": (cls.loras,),
-            "model_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "clip_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "lora_name_3": (cls.loras,),
-            "model_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "clip_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "lora_name_4": (cls.loras,),
-            "model_str_4": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "clip_str_4": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "lora_name_5": (cls.loras,),
-            "model_str_5": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "clip_str_5": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),},
+                            "lora_name_1": (cls.loras,),
+                            "model_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                            "clip_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                            "lora_name_2": (cls.loras,),
+                            "model_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                            "clip_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                            "lora_name_3": (cls.loras,),
+                            "model_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                            "clip_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                            "lora_name_4": (cls.loras,),
+                            "model_str_4": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                            "clip_str_4": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                            "lora_name_5": (cls.loras,),
+                            "model_str_5": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                            "clip_str_5": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),},
+                "optional": {"lora_stack": ("LORA_STACK",)}
         }
 
     RETURN_TYPES = ("XY",)
@@ -2017,17 +1751,51 @@ class TSC_XYplot_LoRA_Adv:
     FUNCTION = "xy_value"
     CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
 
-    def xy_value(self, lora_name_1, model_str_1, clip_str_1, lora_name_2, model_str_2, clip_str_2,
-                 lora_name_3, model_str_3, clip_str_3, lora_name_4, model_str_4, clip_str_4, lora_name_5, model_str_5, clip_str_5):
+    def xy_value(self, lora_name_1, model_str_1, clip_str_1, lora_name_2, model_str_2, clip_str_2, lora_name_3,
+                 model_str_3,
+                 clip_str_3, lora_name_4, model_str_4, clip_str_4, lora_name_5, model_str_5, clip_str_5,
+                 lora_stack=None):
         xy_type = "LoRA"
         loras = [lora_name_1, lora_name_2, lora_name_3, lora_name_4, lora_name_5]
         model_strs = [model_str_1, model_str_2, model_str_3, model_str_4, model_str_5]
         clip_strs = [clip_str_1, clip_str_2, clip_str_3, clip_str_4, clip_str_5]
-        xy_value = [(lora, model_str, clip_str) for lora, model_str, clip_str in zip(loras, model_strs, clip_strs) if lora != "None"]
+
+        # Extend each sub-array with lora_stack if it's not None
+        xy_value = [[(lora, model_str, clip_str)] + (lora_stack if lora_stack else []) for lora, model_str, clip_str in
+                    zip(loras, model_strs, clip_strs) if lora != "None"]
+
         if not xy_value:  # Check if the list is empty
             return (None,)
         return ((xy_type, xy_value),)
 
+
+# TSC XY Plot: LoRA Stacks
+class TSC_XYplot_LoRA_Stacks:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+                    "node_state": (["Enabled", "Disabled"],)},
+                "optional": {
+                    "lora_stack_1": ("LORA_STACK",),
+                    "lora_stack_2": ("LORA_STACK",),
+                    "lora_stack_3": ("LORA_STACK",),
+                    "lora_stack_4": ("LORA_STACK",),
+                    "lora_stack_5": ("LORA_STACK",),},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, node_state, lora_stack_1=None, lora_stack_2=None, lora_stack_3=None, lora_stack_4=None, lora_stack_5=None):
+        xy_type = "LoRA"
+        xy_value = [stack for stack in [lora_stack_1, lora_stack_2, lora_stack_3, lora_stack_4, lora_stack_5] if stack is not None]
+        if not xy_value or not any(xy_value) or node_state == "Disabled":
+            return (None,)
+        else:
+            return ((xy_type, xy_value),)
 
 # TSC XY Plot: Manual Entry Notes
 class TSC_XYplot_Manual_XY_Entry_Info:
@@ -2406,13 +2174,11 @@ class TSC_XYplot_Manual_XY_Entry:
                 if Y_value[i] == None:
                     return (None,None,)
 
-        # Clean Schedulers from Sampler data (if other type is Scheduler)
-        if X_type == "Sampler" and Y_type == "Scheduler":
-            # Clear X_value Scheduler's
-            X_value = [[x[0], ""] for x in X_value]
-        elif Y_type == "Sampler" and X_type == "Scheduler":
-            # Clear Y_value Scheduler's
-            Y_value = [[y[0], ""] for y in Y_value]
+        # Nest LoRA value in another array to reflect LoRA stack changes
+        if X_type == "LoRA":
+            X_value = [X_value]
+        if Y_type == "LoRA":
+            Y_value = [Y_value]
 
         # Clean X/Y_values
         if X_type == "Nothing":
@@ -2670,6 +2436,8 @@ class TSC_EvalExamples:
 NODE_CLASS_MAPPINGS = {
     "KSampler (Efficient)": TSC_KSampler,
     "Efficient Loader": TSC_EfficientLoader,
+    "LoRA Stacker": TSC_LoRA_Stacker,
+    "LoRA Stacker Adv.": TSC_LoRA_Stacker_Adv,
     "XY Plot": TSC_XYplot,
     "XY Input: Seeds++ Batch": TSC_XYplot_SeedsBatch,
     "XY Input: Steps": TSC_XYplot_Steps,
@@ -2683,7 +2451,8 @@ NODE_CLASS_MAPPINGS = {
     "XY Input: Checkpoint": TSC_XYplot_Checkpoint,
     "XY Input: Clip Skip": TSC_XYplot_ClipSkip,
     "XY Input: LoRA": TSC_XYplot_LoRA,
-    "XY Input: LoRA (Advanced)": TSC_XYplot_LoRA_Adv,
+    "XY Input: LoRA Adv.": TSC_XYplot_LoRA_Adv,
+    "XY Input: LoRA Stacks": TSC_XYplot_LoRA_Stacks,
     "XY Input: Manual XY Entry": TSC_XYplot_Manual_XY_Entry,
     "Manual XY Entry Info": TSC_XYplot_Manual_XY_Entry_Info,
     "Join XY Inputs of Same Type": TSC_XYplot_JoinInputs,
