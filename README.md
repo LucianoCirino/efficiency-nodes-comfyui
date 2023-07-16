@@ -29,15 +29,15 @@ Efficiency Nodes for ComfyUI
   
 - HiResFix using the **Efficient Loader** & **Ksampler (Efficient)**
 
-<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/HiResFix__.png" width="720">
+<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/HiRes Fix (overview).png" width="720">
 
 - 2D Plotting using the **XY Plot** & **Ksampler (Efficient)** nodes 
 
-<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/1_.png" width="720">
+<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/X-Seeds Y-Checkpoints (overview).png" width="720">
 
 - Photobashing using the **Image Overlay** node
 
-<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/ImgOverlay.png" width="720">
+<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/Image Overlay (overview).png" width="720">
 
 ## **Install:**
 To install, drop the "_**efficiency-nodes-comfyui**_" folder into the "_**...\ComfyUI\ComfyUI\custom_nodes**_" directory and restart UI.
