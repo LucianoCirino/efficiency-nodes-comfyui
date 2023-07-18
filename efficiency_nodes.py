@@ -2176,9 +2176,9 @@ class TSC_XYplot_Manual_XY_Entry:
 
         # Nest LoRA value in another array to reflect LoRA stack changes
         if X_type == "LoRA":
-            X_value = [X_value]
+            X_value = [[x] for x in X_value]
         if Y_type == "LoRA":
-            Y_value = [Y_value]
+            Y_value = [[y] for y in Y_value]
 
         # Clean X/Y_values
         if X_type == "Nothing":
