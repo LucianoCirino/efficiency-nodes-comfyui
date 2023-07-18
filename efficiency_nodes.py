@@ -1876,7 +1876,7 @@ class TSC_XYplot_Manual_XY_Entry:
 
         # Define the valid bounds for each type
         bounds = {
-            "Seeds++ Batch": {"min": 0, "max": 50},
+            "Seeds++ Batch": {"min": 1, "max": 50},
             "Steps": {"min": 1, "max": 10000},
             "CFG Scale": {"min": 0, "max": 100},
             "Sampler": {"options": comfy.samplers.KSampler.SAMPLERS},
