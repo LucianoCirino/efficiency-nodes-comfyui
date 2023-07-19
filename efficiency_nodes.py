@@ -2332,7 +2332,7 @@ def packages(versions=False):
     return [(r.decode().split('==')[0] if not versions else r.decode()) for r in subprocess.check_output([sys.executable, '-m', 'pip', 'freeze']).split()]
 
 install_simpleeval()
-from simpleeval import simple_eval
+import simpleeval
 
 # TSC Evaluate Integers (https://github.com/danthedeckie/simpleeval)
 class TSC_EvaluateInts:
@@ -2353,7 +2353,7 @@ class TSC_EvaluateInts:
 
     def evaluate(self, python_expression, print_to_console, a=0, b=0, c=0):
         # simple_eval doesn't require the result to be converted to a string
-        result = simple_eval(python_expression, names={'a': a, 'b': b, 'c': c})
+        result = simpleeval.simple_eval(python_expression, names={'a': a, 'b': b, 'c': c})
         int_result = int(result)
         float_result = float(result)
         string_result = str(result)
@@ -2383,7 +2383,7 @@ class TSC_EvaluateFloats:
 
     def evaluate(self, python_expression, print_to_console, a=0, b=0, c=0):
         # simple_eval doesn't require the result to be converted to a string
-        result = simple_eval(python_expression, names={'a': a, 'b': b, 'c': c})
+        result = simpleeval.simple_eval(python_expression, names={'a': a, 'b': b, 'c': c})
         int_result = int(result)
         float_result = float(result)
         string_result = str(result)
@@ -2413,8 +2413,11 @@ class TSC_EvaluateStrs:
 
     def evaluate(self, python_expression, print_to_console, a="", b="", c=""):
         variables = {'a': a, 'b': b, 'c': c}  # Define the variables for the expression
-        functions = {"len": len}  # Define the functions for the expression
-        result = simple_eval(python_expression, names=variables, functions=functions)
+        
+        functions = simpleeval.DEFAULT_FUNCTIONS.copy()
+        functions.update({"len": len}) # Add the functions for the expression
+        
+        result = simpleeval.simple_eval(python_expression, names=variables, functions=functions)
         if print_to_console == "True":
             print("\n\033[31mEvaluate Strings:\033[0m")
             print(f"\033[90ma = {a} \nb = {b} \nc = {c}\033[0m")
