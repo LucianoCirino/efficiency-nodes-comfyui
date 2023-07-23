@@ -88,8 +88,10 @@ class TSC_EfficientLoader:
         # Retrieve cache numbers
         vae_cache, ckpt_cache, lora_cache = get_cache_numbers("Efficient Loader")
 
-        if lora_name != "None":
-            lora_params = [(lora_name, lora_model_strength, lora_clip_strength)]
+        if lora_name != "None" or lora_stack is not None:
+            lora_params = []
+            if lora_name != "None":
+                lora_params.append((lora_name, lora_model_strength, lora_clip_strength))
             if lora_stack is not None:
                 lora_params.extend(lora_stack)
             model, clip = load_lora(lora_params, ckpt_name, my_unique_id, cache=lora_cache, ckpt_cache=ckpt_cache, cache_overwrite=True)
