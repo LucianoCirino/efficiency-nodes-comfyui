@@ -491,6 +491,9 @@ class TSC_KSampler:
                 positive_prompt = None
                 negative_prompt = None
                 clip_skip = None
+                merge_ckpt_name = None
+                merge_ckpt_weight = None
+                merge_clip_weight = None
 
                 # Unpack script Tuple (X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, dependencies)
                 X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models, xyplot_as_output_image,\
@@ -586,10 +589,11 @@ class TSC_KSampler:
                 #_______________________________________________________________________________________________________
                 # Function that changes appropiate variables for next processed generations (also generates XY_labels)
                 def define_variable(var_type, var, seed, steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                    clip_skip, positive_prompt, negative_prompt, lora_params, var_label, num_label):
+                                    clip_skip, positive_prompt, negative_prompt, lora_params, var_label, num_label, merge_ckpt_name, merge_ckpt_weight, merge_clip_weight):
 
                     # Define default max label size limit
                     max_label_len = 36
+                    text = ""
 
                     # If var_type is "Seeds++ Batch", update var and seed, and generate labels
                     if var_type == "Seeds++ Batch":
@@ -669,6 +673,17 @@ class TSC_KSampler:
                         ckpt_filename = os.path.splitext(os.path.basename(ckpt_name))[0]
                         text = f"{ckpt_filename}"
 
+                    elif var_type == "Checkpoint Merge" or var_type == "Checkpoint Merge Adv":
+                        merge_ckpt_name = var[0]
+                        merge_ckpt_weight = var[1] if var[1] is not None else 0.5
+                        merge_clip_weight = var[2] if var[2] is not None else 0.5
+                        merge_ckpt_filename = os.path.splitext(os.path.basename(merge_ckpt_name))[0]
+                        
+                        if merge_ckpt_weight != merge_clip_weight:
+                            text = f"{merge_ckpt_filename} ({merge_ckpt_weight:.2f}|{merge_clip_weight:.2f})"
+                        else:
+                            text = f"{merge_ckpt_filename} ({merge_ckpt_weight:.2f})"
+
                     elif var_type == "Clip Skip":
                         clip_skip = (var, clip_skip[1])
                         text = f"Clip Skip ({clip_skip[0]})"
@@ -713,12 +728,12 @@ class TSC_KSampler:
 
                     # Return the modified variables
                     return steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, \
-                        positive_prompt, negative_prompt, lora_params, var_label
+                        positive_prompt, negative_prompt, lora_params, var_label, merge_ckpt_name, merge_ckpt_weight, merge_clip_weight
 
                 # _______________________________________________________________________________________________________
                 # The function below is used to smartly load Checkpoint/LoRA/VAE models between generations.
                 def define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip, vae,
-                                 vae_name, ckpt_name, lora_params, index, types, script_node_id, cache):
+                                 vae_name, ckpt_name, lora_params, index, types, script_node_id, cache, merge_ckpt_name, merge_ckpt_weight, merge_clip_weight):
         
                     # Encode prompt and apply clip_skip. Return new conditioning.
                     def encode_prompt(positive_prompt, negative_prompt, clip, clip_skip):
@@ -756,6 +771,48 @@ class TSC_KSampler:
                         model, clip = load_lora(lora_params, ckpt_name, script_node_id,
                                                 cache=None, ckpt_cache=cache[1])
                         encode = True
+
+                    if (X_type == "Checkpoint Merge" or Y_type == "Checkpoint Merge"):
+                        # merge the model
+                        if lora_params is None:
+                            model2, clip2, _ = load_checkpoint(merge_ckpt_name, script_node_id, output_vae=False, cache=cache[1])
+                        else: # Load Efficient Loader LoRA
+                            model2, clip2 = load_lora(lora_params, merge_ckpt_name, script_node_id,
+                                                              cache=cache[2], ckpt_cache=cache[1])
+                        model1 = None
+                        clip1 = None
+                        if encode:
+                            model1 = model.clone()
+                            if clip is not None:
+                                clip1 = clip.clone()
+                        else:
+                            # load the model again so that we do not modify the previously modified one
+                            if lora_params is None:
+                                tmp_model, tmp_clip, _ = load_checkpoint(ckpt_name, script_node_id, output_vae=False, cache=cache[1])
+                            else: # Load Efficient Loader LoRA
+                                tmp_model, tmp_clip = load_lora(lora_params, ckpt_name, script_node_id,
+                                                        cache=cache[2], ckpt_cache=cache[1])
+                            model1 = tmp_model.clone()
+                            if tmp_clip is not None:
+                                clip1 = tmp_clip.clone()
+                            
+                        # merge model
+                        kp = model2.get_key_patches("diffusion_model.")
+                        for k in kp:
+                            model1.add_patches({k: kp[k]}, merge_ckpt_weight, 1.0 - merge_ckpt_weight)
+                            
+                        # merge clip
+                        if clip2 is not None and clip1 is not None:
+                            kp = clip2.get_key_patches()
+                            for k in kp:
+                                if k.endswith(".position_ids") or k.endswith(".logit_scale"):
+                                    continue
+                                clip1.add_patches({k: kp[k]}, merge_clip_weight, 1-merge_clip_weight)
+                            clip = clip1
+                            encode = True
+                        
+                        model = model1
+                        
 
                     # Encode Prompt if required
                     prompt_types = ["Positive Prompt S/R", "Negative Prompt S/R", "Clip Skip"]
@@ -827,16 +884,16 @@ class TSC_KSampler:
 
                     # Define X parameters and generate labels
                     steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, positive_prompt, negative_prompt, \
-                        lora_params, X_label = \
+                        lora_params, X_label, merge_ckpt_name, merge_ckpt_weight, merge_clip_weight = \
                         define_variable(X_type, X, seed_updated, steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                        clip_skip, positive_prompt, negative_prompt, lora_params, X_label, len(X_value))
+                                        clip_skip, positive_prompt, negative_prompt, lora_params, X_label, len(X_value), merge_ckpt_name, merge_ckpt_weight, merge_clip_weight)
 
                     if X_type != "Nothing" and Y_type == "Nothing":
 
                         # Models & Conditionings
                         model, positive, negative , vae = \
                             define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip[0], vae,
-                                         vae_name, ckpt_name, lora_params, 0, types, script_node_id, cache)
+                                         vae_name, ckpt_name, lora_params, 0, types, script_node_id, cache, merge_ckpt_name, merge_ckpt_weight, merge_clip_weight)
 
                         # Generate Results
                         latent_list, image_tensor_list, image_pil_list = \
@@ -852,14 +909,14 @@ class TSC_KSampler:
                                 seed_updated = seed + Y_index
 
                             # Define Y parameters and generate labels
-                            steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, positive_prompt, negative_prompt, lora_params, Y_label = \
+                            steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, positive_prompt, negative_prompt, lora_params, Y_label, merge_ckpt_name, merge_ckpt_weight, merge_clip_weight = \
                                 define_variable(Y_type, Y, seed_updated, steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                                clip_skip, positive_prompt, negative_prompt, lora_params, Y_label, len(Y_value))
+                                                clip_skip, positive_prompt, negative_prompt, lora_params, Y_label, len(Y_value), merge_ckpt_name, merge_ckpt_weight, merge_clip_weight)
 
                             # Models & Conditionings
                             model, positive, negative, vae = \
                                 define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip[0], vae,
-                                         vae_name, ckpt_name, lora_params, Y_index, types, script_node_id, cache)
+                                         vae_name, ckpt_name, lora_params, Y_index, types, script_node_id, cache, merge_ckpt_name, merge_ckpt_weight, merge_clip_weight)
 
                             # Generate Results
                             latent_list, image_tensor_list, image_pil_list = \
@@ -1655,6 +1712,89 @@ class TSC_XYplot_Checkpoint:
         if not xy_value:  # Check if the list is empty
             return (None,)
         return ((xy_type, xy_value),)
+
+
+# TSC XY Plot: Checkpoint Merge
+class TSC_XYplot_Checkpoint_Merge:
+    checkpoints = ["None"] + folder_paths.get_filename_list("checkpoints")
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "ckpt_name_1": (cls.checkpoints,),
+            "ckpt_weight1": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            "ckpt_name_2": (cls.checkpoints,),
+            "ckpt_weight2": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            "ckpt_name_3": (cls.checkpoints,),
+            "ckpt_weight3": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            "ckpt_name_4": (cls.checkpoints,),
+            "ckpt_weight4": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            "ckpt_name_5": (cls.checkpoints,),
+            "ckpt_weight5": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            },
+        }
+        
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    
+    def xy_value(self, ckpt_name_1, ckpt_weight1, ckpt_name_2, ckpt_weight2, ckpt_name_3, ckpt_weight3,
+                 ckpt_name_4, ckpt_weight4, ckpt_name_5, ckpt_weight5):
+        xy_type = "Checkpoint Merge"
+        checkpoints = [ckpt_name_1, ckpt_name_2, ckpt_name_3, ckpt_name_4, ckpt_name_5]
+        checkpoints_weights = [ckpt_weight1, ckpt_weight2, ckpt_weight3, ckpt_weight4, ckpt_weight5]
+        clip_weights = [ckpt_weight1, ckpt_weight2, ckpt_weight3, ckpt_weight4, ckpt_weight5]
+        xy_value = [(checkpoint, ckptweight, clipweight) for checkpoint, ckptweight, clipweight in zip(checkpoints, checkpoints_weights, clip_weights) if
+                    checkpoint != "None"]
+        if not xy_value:  # Check if the list is empty
+            return (None,)
+        return ((xy_type, xy_value),)
+    
+    
+# TSC XY Plot: Checkpoint Merge Advanced
+# Allows to set different checkpoint and clip weights
+class TSC_XYplot_Checkpoint_Merge_Advanced:
+    checkpoints = ["None"] + folder_paths.get_filename_list("checkpoints")
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "ckpt_name_1": (cls.checkpoints,),
+            "ckpt_weight1": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            "clip_weight1": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            "ckpt_name_2": (cls.checkpoints,),
+            "ckpt_weight2": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            "clip_weight2": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            "ckpt_name_3": (cls.checkpoints,),
+            "ckpt_weight3": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            "clip_weight3": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            "ckpt_name_4": (cls.checkpoints,),
+            "ckpt_weight4": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            "clip_weight4": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            "ckpt_name_5": (cls.checkpoints,),
+            "ckpt_weight5": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            "clip_weight5": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
+            },
+        }
+        
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    
+    def xy_value(self, ckpt_name_1, ckpt_weight1, clip_weight1, ckpt_name_2, ckpt_weight2, clip_weight2, ckpt_name_3, ckpt_weight3, clip_weight3,
+                 ckpt_name_4, ckpt_weight4, clip_weight4, ckpt_name_5, ckpt_weight5, clip_weight5):
+        xy_type = "Checkpoint Merge Adv"
+        checkpoints = [ckpt_name_1, ckpt_name_2, ckpt_name_3, ckpt_name_4, ckpt_name_5]
+        checkpoints_weights = [ckpt_weight1, ckpt_weight2, ckpt_weight3, ckpt_weight4, ckpt_weight5]
+        clip_weights = [clip_weight1, clip_weight2, clip_weight3, clip_weight4, clip_weight5]
+        xy_value = [(checkpoint, ckptweight, clipweight) for checkpoint, ckptweight, clipweight in zip(checkpoints, checkpoints_weights, clip_weights) if
+                    checkpoint != "None"]
+        if not xy_value:  # Check if the list is empty
+            return (None,)
+        return ((xy_type, xy_value),)
+
 
 # TSC XY Plot: Clip Skip
 class TSC_XYplot_ClipSkip:
@@ -2452,6 +2592,8 @@ NODE_CLASS_MAPPINGS = {
     "XY Input: Positive Prompt S/R": TSC_XYplot_PromptSR_Positive,
     "XY Input: Negative Prompt S/R": TSC_XYplot_PromptSR_Negative,
     "XY Input: Checkpoint": TSC_XYplot_Checkpoint,
+    "XY Input: Checkpoint Merge": TSC_XYplot_Checkpoint_Merge,
+    "XY Input: Checkpoint Merge Adv.": TSC_XYplot_Checkpoint_Merge_Advanced,
     "XY Input: Clip Skip": TSC_XYplot_ClipSkip,
     "XY Input: LoRA": TSC_XYplot_LoRA,
     "XY Input: LoRA Adv.": TSC_XYplot_LoRA_Adv,
