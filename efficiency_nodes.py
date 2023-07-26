@@ -89,12 +89,20 @@ class TSC_EfficientLoader:
         vae_cache, ckpt_cache, lora_cache = get_cache_numbers("Efficient Loader")
 
         if lora_name != "None" or lora_stack is not None:
+            # Initialize an empty list to store LoRa parameters.
             lora_params = []
+
+            # Check if lora_name is not the string "None" and if so, add its parameters.
             if lora_name != "None":
                 lora_params.append((lora_name, lora_model_strength, lora_clip_strength))
-            if lora_stack is not None:
+
+            # If lora_stack is not None or an empty list, extend lora_params with its items.
+            if lora_stack:
                 lora_params.extend(lora_stack)
-            model, clip = load_lora(lora_params, ckpt_name, my_unique_id, cache=lora_cache, ckpt_cache=ckpt_cache, cache_overwrite=True)
+
+            # If there are any parameters in lora_params, load the LoRa with them.
+            if lora_params:
+                model, clip = load_lora(lora_params, ckpt_name, my_unique_id, cache=lora_cache, ckpt_cache=ckpt_cache, cache_overwrite=True)
             if vae_name == "Baked VAE":
                 vae = get_bvae_by_ckpt_name(ckpt_name)
         else:
