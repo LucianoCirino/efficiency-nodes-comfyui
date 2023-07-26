@@ -1886,7 +1886,7 @@ class TSC_XYplot_Manual_XY_Entry:
             "Checkpoint": {"options": folder_paths.get_filename_list("checkpoints")},
             "Clip Skip": {"min": -24, "max": -1},
             "LoRA": {"options": folder_paths.get_filename_list("loras"),
-                     "model_str": {"min": 0, "max": 10},"clip_str": {"min": 0, "max": 10},},
+                     "model_str": {"min": -10, "max": 10},"clip_str": {"min": -10, "max": 10},},
         }
 
         # Validates a value based on its corresponding value_type and bounds.
