@@ -88,7 +88,7 @@ class TSC_EfficientLoader:
         # Retrieve cache numbers
         vae_cache, ckpt_cache, lora_cache = get_cache_numbers("Efficient Loader")
 
-        if lora_name != "None" or lora_stack is not None:
+        if lora_name != "None" or lora_stack:
             # Initialize an empty list to store LoRa parameters.
             lora_params = []
 
