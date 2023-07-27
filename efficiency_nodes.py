@@ -100,9 +100,9 @@ class TSC_EfficientLoader:
             if lora_stack:
                 lora_params.extend(lora_stack)
 
-            # If there are any parameters in lora_params, load the LoRa with them.
-            if lora_params:
-                model, clip = load_lora(lora_params, ckpt_name, my_unique_id, cache=lora_cache, ckpt_cache=ckpt_cache, cache_overwrite=True)
+            # Load LoRa(s)
+            model, clip = load_lora(lora_params, ckpt_name, my_unique_id, cache=lora_cache, ckpt_cache=ckpt_cache, cache_overwrite=True)
+
             if vae_name == "Baked VAE":
                 vae = get_bvae_by_ckpt_name(ckpt_name)
         else:
