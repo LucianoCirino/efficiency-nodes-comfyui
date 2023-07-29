@@ -2,7 +2,7 @@
 #  by Luciano Cirino (Discord: TSC#9184) - April 2023
 
 from comfy.sd import ModelPatcher, CLIP, VAE
-from nodes import common_ksampler, CLIPSetLastLayer,  CLIPTextEncode
+from nodes import common_ksampler, CLIPSetLastLayer, CLIPTextEncode
 
 from torch import Tensor
 from PIL import Image, ImageOps, ImageDraw, ImageFont
