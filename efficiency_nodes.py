@@ -2,7 +2,7 @@
 #  by Luciano Cirino (Discord: TSC#9184) - April 2023
 
 from comfy.sd import ModelPatcher, CLIP, VAE
-from nodes import common_ksampler, CLIPSetLastLayer
+from nodes import common_ksampler, CLIPSetLastLayer,  CLIPTextEncode
 
 from torch import Tensor
 from PIL import Image, ImageOps, ImageDraw, ImageFont
@@ -117,15 +117,16 @@ class TSC_EfficientLoader:
         ###print_loaded_objects_entries()
 
         # CLIP skip
-        if not clip:
-            raise Exception("No CLIP found")
-        clip = clip.clone()
-        clip.clip_layer(clip_skip)
+        clip = CLIPSetLastLayer().set_last_layer(clip, clip_skip)[0]
+
+        # Encode Conditionings
+        positive_encoded = CLIPTextEncode().encode(clip, positive)[0]
+        negative_encoded = CLIPTextEncode().encode(clip, negative)[0]
 
         # Data for XY Plot
         dependencies = (vae_name, ckpt_name, clip, clip_skip, positive, negative, lora_params)
 
-        return (model, [[clip.encode(positive), {}]], [[clip.encode(negative), {}]], {"samples":latent}, vae, clip, dependencies, )
+        return (model, positive_encoded, negative_encoded, {"samples":latent}, vae, clip, dependencies, )
 
 ########################################################################################################################
 # TSC LoRA Stacker
@@ -733,7 +734,9 @@ class TSC_KSampler:
                     # Encode prompt and apply clip_skip. Return new conditioning.
                     def encode_prompt(positive_prompt, negative_prompt, clip, clip_skip):
                         clip = CLIPSetLastLayer().set_last_layer(clip, clip_skip)[0]
-                        return [[clip.encode(positive_prompt), {}]], [[clip.encode(negative_prompt), {}]]
+                        positive_encoded = CLIPTextEncode().encode(clip, positive_prompt)[0]
+                        negative_encoded = CLIPTextEncode().encode(clip, negative_prompt)[0]
+                        return positive_encoded, negative_encoded
 
                     # Variable to track wether to encode prompt or not
                     encode = False
