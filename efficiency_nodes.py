@@ -504,8 +504,7 @@ class TSC_KSampler:
                 clip_skip = None
 
                 # Unpack script Tuple (X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, dependencies)
-                X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models, xyplot_as_output_image,\
-                    flip_xy, dependencies = script
+                X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models, xyplot_as_output_image, dependencies = script
 
                 # Unpack Effficient Loader dependencies
                 if dependencies is not None:
@@ -548,6 +547,20 @@ class TSC_KSampler:
                 positive_prompt = (positive_prompt, positive_prompt)
                 negative_prompt = (negative_prompt, negative_prompt)
 
+                # Optimize image generation by prioritizing Checkpoint>LoRA>VAE>PromptSR as X in For Loop. Flip back when done.
+                if Y_type == "Checkpoint" or \
+                        Y_type == "LoRA" and X_type not in {"Checkpoint"} or \
+                        Y_type == "VAE" and X_type not in {"Checkpoint", "LoRA"} or \
+                        Y_type == "Positive Prompt S/R" and X_type not in {"Checkpoint", "LoRA", "VAE",
+                                                                           "Negative Prompt S/R"} or \
+                        Y_type == "Negative Prompt S/R" and X_type not in {"Checkpoint", "LoRA", "VAE",
+                                                                           "Positive Prompt S/R"} or \
+                        X_type == "Nothing" and Y_type != "Nothing":
+                    flip_xy = True
+                    X_type, Y_type = Y_type, X_type
+                    X_value, Y_value = Y_value, X_value
+                else:
+                    flip_xy = False
                 #_______________________________________________________________________________________________________
                 #The below code will clean from the cache any ckpt/vae/lora models it will not be reusing.
 
@@ -707,6 +720,8 @@ class TSC_KSampler:
                             lora_filenames = [filename[:max_name_length] for filename in lora_filenames]
                             text_elements = [f"{lora_filename}({lora_details[i][0]})" if lora_details[i][0] == lora_details[i][1] else f"{lora_filename}({lora_details[i][0]},{lora_details[i][1]})" for i, lora_filename in enumerate(lora_filenames)]
                             text = " ".join(text_elements)
+                    else:
+                        text=""
 
                     def truncate_texts(texts, num_label, max_label_len):
                         truncate_length = max(min(max(len(text) for text in texts), max_label_len), 24)
@@ -1323,31 +1338,16 @@ class TSC_XYplot:
             # Y_value second tuple value of each array entry = None
             Y_value = [(y, None) for y in Y_value]
 
-        # Optimize image generation by prioritizing Checkpoint>LoRA>VAE>PromptSR as X in For Loop. Flip back when done.
-        if Y_type == "Checkpoint" or \
-                Y_type == "LoRA" and X_type not in {"Checkpoint"} or \
-                Y_type == "VAE" and X_type not in {"Checkpoint", "LoRA"} or \
-                Y_type == "Positive Prompt S/R" and X_type not in {"Checkpoint", "LoRA", "VAE",
-                                                                   "Negative Prompt S/R"} or \
-                Y_type == "Negative Prompt S/R" and X_type not in {"Checkpoint", "LoRA", "VAE",
-                                                                   "Positive Prompt S/R"} or \
-                X_type == "Nothing" and Y_type != "Nothing":
-            flip_xy = True
-            X_type, Y_type = Y_type, X_type
-            X_value, Y_value = Y_value, X_value
-        else:
-            flip_xy = False
-
         # Flip X and Y
         if XY_flip == "True":
             X_type, Y_type = Y_type, X_type
             X_value, Y_value = Y_value, X_value
-
+            
         # Define Ksampler output image behavior
         xyplot_as_output_image = ksampler_output_image == "Plot"
 
         return ((X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models,
-                 xyplot_as_output_image, flip_xy, dependencies),)
+                 xyplot_as_output_image, dependencies),)
 
 
 # TSC XY Plot: Seeds Values
