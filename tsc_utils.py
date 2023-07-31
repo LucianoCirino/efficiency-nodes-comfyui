@@ -7,6 +7,8 @@ import numpy as np
 
 import os
 import sys
+import io
+from contextlib import contextmanager
 import json
 import folder_paths
 
@@ -176,8 +178,9 @@ def load_checkpoint(ckpt_name, id, output_vae=True, cache=None, cache_overwrite=
             return model, clip, vae
 
     ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
-    out = load_checkpoint_guess_config_tsc(ckpt_path, output_vae, output_clip=True,
-                                                embedding_directory=folder_paths.get_folder_paths("embeddings"))
+    with suppress_output():
+        out = load_checkpoint_guess_config(ckpt_path, output_vae, output_clip=True,
+                                           embedding_directory=folder_paths.get_folder_paths("embeddings"))
     model = out[0]
     clip = out[1]
     vae = out[2]  # bvae
@@ -425,3 +428,18 @@ def print_last_helds(id=None):
                 print(f"  [{i}] Output: {output}")
     print("-" * 40)  # Print a separator line
     print("\n")  # Print an empty line
+
+# For suppressing print outputs from functions
+@contextmanager
+def suppress_output():
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+
+    sys.stdout = io.StringIO()
+    sys.stderr = io.StringIO()
+
+    try:
+        yield
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
