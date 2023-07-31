@@ -2,7 +2,7 @@
 #  by Luciano Cirino (Discord: TSC#9184) - April 2023
 
 from comfy.sd import ModelPatcher, CLIP, VAE
-from nodes import common_ksampler, CLIPSetLastLayer, CLIPTextEncode
+from nodes import KSampler, KSamplerAdvanced, CLIPSetLastLayer, CLIPTextEncode
 
 from torch import Tensor
 from PIL import Image, ImageOps, ImageDraw, ImageFont
@@ -244,7 +244,8 @@ class TSC_KSampler:
     
     def sample(self, sampler_state, model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
                latent_image, preview_image, denoise=1.0, prompt=None, extra_pnginfo=None, my_unique_id=None,
-               optional_vae=(None,), script=None):
+               optional_vae=(None,), script=None, add_noise=None, start_at_step=None, end_at_step=None,
+               return_with_leftover_noise=None):
 
         # Extract node_settings from json
         def get_settings():
@@ -376,9 +377,12 @@ class TSC_KSampler:
         # Check the current sampler state
         if sampler_state == "Sample":
 
-            # Sample using the common KSampler function and store the samples
-            samples = common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-                                      latent_image, denoise=denoise)
+            # Sample using the Comfy KSampler nodes
+            if add_noise==None:
+                samples = KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
+            else:
+                samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler, positive, negative,
+                                latent_image, start_at_step, end_at_step, return_with_leftover_noise, denoise=1.0)
 
             # Extract the latent samples from the returned samples dictionary
             latent = samples[0]["samples"]
@@ -801,9 +805,14 @@ class TSC_KSampler:
                 def process_values(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
                                    denoise, vae, latent_list=[], image_tensor_list=[], image_pil_list=[]):
 
-                    # Sample
-                    samples = common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-                                              latent_image, denoise=denoise)
+                    # Sample using the Comfy KSampler nodes
+                    if add_noise == None:
+                        samples = KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler,
+                                                    positive, negative, latent_image, denoise=denoise)
+                    else:
+                        samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler,
+                                                            positive, negative, latent_image, start_at_step, end_at_step,
+                                                            return_with_leftover_noise, denoise=1.0)
 
                     # Decode images and store
                     latent = samples[0]["samples"]
@@ -1263,6 +1272,48 @@ class TSC_KSampler:
                 "ui": {"images": images},
                 "result": (model, positive, negative, {"samples": latent_list}, vae, image_tensor_list,)
             }
+
+# TSC KSampler Adv (Efficient)
+class TSC_KSamplerAdvanced(TSC_KSampler):
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required":
+                    {"sampler_state": (["Sample", "Hold", "Script"],),
+                     "model": ("MODEL",),
+                     "add_noise": (["enable", "disable"],),
+                     "noise_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                     "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                     "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
+                     "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
+                     "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
+                     "positive": ("CONDITIONING",),
+                     "negative": ("CONDITIONING",),
+                     "latent_image": ("LATENT",),
+                     "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
+                     "end_at_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
+                     "return_with_leftover_noise": (["disable", "enable"],),
+                     "preview_image": (["Disabled", "Enabled", "Output Only"],),
+                     },
+                "optional": {"optional_vae": ("VAE",),
+                             "script": ("SCRIPT",), },
+                "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO", "my_unique_id": "UNIQUE_ID", },
+                }
+
+    RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "LATENT", "VAE", "IMAGE",)
+    RETURN_NAMES = ("MODEL", "CONDITIONING+", "CONDITIONING-", "LATENT", "VAE", "IMAGE",)
+    OUTPUT_NODE = True
+    FUNCTION = "sampleadv"
+    CATEGORY = "Efficiency Nodes/Sampling"
+
+    def sampleadv(self, sampler_state, model, add_noise, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative,
+               latent_image, start_at_step, end_at_step, return_with_leftover_noise, preview_image,
+               prompt=None, extra_pnginfo=None, my_unique_id=None, optional_vae=(None,), script=None):
+
+        return super().sample(sampler_state, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative,
+               latent_image, preview_image, denoise=1.0, prompt=prompt, extra_pnginfo=extra_pnginfo, my_unique_id=my_unique_id,
+               optional_vae=optional_vae, script=script, add_noise=add_noise, start_at_step=start_at_step,end_at_step=end_at_step,
+                       return_with_leftover_noise=return_with_leftover_noise)
 
 ########################################################################################################################
 # TSC XY Plot
@@ -2451,6 +2502,7 @@ class TSC_EvalExamples:
 # NODE MAPPING
 NODE_CLASS_MAPPINGS = {
     "KSampler (Efficient)": TSC_KSampler,
+    "KSampler Adv. (Efficient)":TSC_KSamplerAdvanced,
     "Efficient Loader": TSC_EfficientLoader,
     "LoRA Stacker": TSC_LoRA_Stacker,
     "LoRA Stacker Adv.": TSC_LoRA_Stacker_Adv,
