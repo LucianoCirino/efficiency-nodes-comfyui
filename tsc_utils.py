@@ -306,6 +306,10 @@ def load_lora(lora_params, ckpt_name, id, cache=None, ckpt_cache=None, cache_ove
 
         lora_name, strength_model, strength_clip = lora_params[0]
         lora_path = folder_paths.get_full_path("loras", lora_name)
+        #print("LoRA loading: ", lora_name)
+        #print("Model strength loading: ", strength_model)
+        #print("Clip strength loading: ", strength_clip)
+
         lora_model, lora_clip = load_lora_for_models_tsc(ckpt, clip, lora_path, strength_model, strength_clip)
 
         # Call the function again with the new lora_model and lora_clip and the remaining tuples
@@ -376,11 +380,11 @@ def clear_cache_by_exception(node_id, vae_dict=None, ckpt_dict=None, lora_dict=N
                     # Compare lists of tuples considering order inside tuples, but not order of tuples
                     if set(lora_params) == set(tuple_item[0]) and ckpt_name == tuple_item[1]:
                         break
-                else:  # If no match was found in lora_dict, remove the tuple from loaded_objects
-                    if node_id in tuple_item[-1]:
-                        tuple_item[-1].remove(node_id)
-                        if not tuple_item[-1]:
-                            loaded_objects[dict_name].remove(tuple_item)
+                    else:  # If no match was found in lora_dict, remove the tuple from loaded_objects
+                        if node_id in tuple_item[-1]:
+                            tuple_item[-1].remove(node_id)
+                            if not tuple_item[-1]:
+                                loaded_objects[dict_name].remove(tuple_item)
                     continue
             elif tuple_item[0] not in arg_val:  # Only remove the tuple if it's not in arg_val
                 if node_id in tuple_item[-1]:
