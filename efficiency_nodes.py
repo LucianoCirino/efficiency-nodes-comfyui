@@ -1571,10 +1571,10 @@ class TSC_XYplot:
             Y_value = [""]
 
         # If types are the same exit. If one isn't "Nothing", print error
-        #if (X_type == Y_type):
-        #    if X_type != "Nothing":
-        #        print(f"\033[31mXY Plot Error:\033[0m X and Y input types must be different.")
-        #    return (None,)
+        if (X_type == Y_type and X_type != "LoRA"):
+            if X_type != "Nothing":
+                print(f"\033[31mXY Plot Error:\033[0m X and Y input types must be different.")
+            return (None,)
 
         # Check that dependencies is connected for Checkpoint and LoRA plots
         types = ("Checkpoint", "LoRA", "Positive Prompt S/R", "Negative Prompt S/R")
