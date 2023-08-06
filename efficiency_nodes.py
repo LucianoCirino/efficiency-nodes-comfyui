@@ -1885,7 +1885,7 @@ class TSC_XYplot_Manual_XY_Entry_Info:
         loras = ";\n".join(folder_paths.get_filename_list("loras"))
         return {"required": {
             "notes": ("STRING", {"default":
-                                    f"_____________SYNTAX_____________\n{syntax}\n\n"
+                                    f"_____________SYNTAX_____________\n{cls.syntax}\n\n"
                                     f"____________SAMPLERS____________\n{samplers}\n\n"
                                     f"___________SCHEDULERS___________\n{schedulers}\n\n"
                                     f"_____________VAES_______________\n{vaes}\n\n"
