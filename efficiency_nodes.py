@@ -42,6 +42,9 @@ import comfy.latent_formats
 # Import my library
 from tsc_utils import *
 
+# Import dependencies
+from simpleeval import simple_eval
+
 MAX_RESOLUTION=8192
 
 ########################################################################################################################
