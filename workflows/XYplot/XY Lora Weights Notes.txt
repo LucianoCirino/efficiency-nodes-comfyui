@@ -1,6 +1,0 @@
-For the XY loRA weights mode to kick in there are a few rules to follow
-	The LoRA you want to view with different model/clip weights should have one LoRA Stacker node per entry on an axis
-		so you need 6 total entries for a 3x3, 8 for a 4x4, 10 for a 5x5, etc
-	Only change one of the weights per axis
-		for instance keep all model weights on X-axis entries "1" or whatever you want it to be, if they are the same it 		will use the other axis's value instead
-	You can add extra LoRAs on top of the one you're changing weights on, but they must be in their own LoRA stacker nodes 	feeding into the X/Y axis changing LoRA stacker nodes. It's probably easiest to look at the example picture
