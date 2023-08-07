@@ -1,8 +1,7 @@
 # Efficiency Nodes - A collection of my ComfyUI custom nodes to help streamline workflows and reduce total node count.
 #  by Luciano Cirino (Discord: TSC#9184) - April 2023
 
-from comfy.sd import ModelPatcher, CLIP, VAE
-from nodes import KSampler, KSamplerAdvanced, CLIPSetLastLayer, CLIPTextEncode
+from nodes import KSampler, KSamplerAdvanced, CLIPSetLastLayer, CLIPTextEncode, ControlNetApply
 
 from torch import Tensor
 from PIL import Image, ImageOps, ImageDraw, ImageFont
@@ -34,12 +33,13 @@ sys.path.append(comfy_dir)
 # Construct the path to the font file
 font_path = os.path.join(my_dir, 'arial.ttf')
 
-# Import functions from ComfyUI
+# Import ComfyUI files
 import comfy.samplers
 import comfy.sd
 import comfy.utils
+import comfy.latent_formats
 
-# Import my util functions
+# Import my library
 from tsc_utils import *
 
 MAX_RESOLUTION=8192
@@ -61,7 +61,8 @@ class TSC_EfficientLoader:
                               "empty_latent_width": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 64}),
                               "empty_latent_height": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 64}),
                               "batch_size": ("INT", {"default": 1, "min": 1, "max": 64})},
-                "optional": {"lora_stack": ("LORA_STACK", )},
+                "optional": {"lora_stack": ("LORA_STACK", ),
+                             "cnet_stack": ("CONTROL_NET_STACK",)},
                 "hidden": { "prompt": "PROMPT",
                             "my_unique_id": "UNIQUE_ID",},
                 }
@@ -73,11 +74,7 @@ class TSC_EfficientLoader:
 
     def efficientloader(self, ckpt_name, vae_name, clip_skip, lora_name, lora_model_strength, lora_clip_strength,
                         positive, negative, empty_latent_width, empty_latent_height, batch_size, lora_stack=None,
-                        prompt=None, my_unique_id=None):
-
-        model: ModelPatcher | None = None
-        clip: CLIP | None = None
-        vae: VAE | None = None
+                        cnet_stack=None, prompt=None, my_unique_id=None):
 
         # Create Empty Latent
         latent = torch.zeros([batch_size, 4, empty_latent_height // 8, empty_latent_width // 8]).cpu()
@@ -123,8 +120,14 @@ class TSC_EfficientLoader:
         positive_encoded = CLIPTextEncode().encode(clip, positive)[0]
         negative_encoded = CLIPTextEncode().encode(clip, negative)[0]
 
+        # Recursively apply Control Net to the positive encoding for each entry in the stack
+        if cnet_stack is not None:
+            for control_net_tuple in cnet_stack:
+                control_net, image, strength = control_net_tuple
+                positive_encoded = ControlNetApply().apply_controlnet(positive_encoded, control_net, image, strength)[0]
+
         # Data for XY Plot
-        dependencies = (vae_name, ckpt_name, clip, clip_skip, positive, negative, lora_params)
+        dependencies = (vae_name, ckpt_name, clip, clip_skip, positive, negative, lora_params, cnet_stack)
 
         return (model, positive_encoded, negative_encoded, {"samples":latent}, vae, clip, dependencies, )
 
@@ -165,6 +168,7 @@ class TSC_LoRA_Stacker:
 
         return (loras,)
 
+#=======================================================================================================================
 # TSC LoRA Stacker Advanced
 class TSC_LoRA_Stacker_Adv:
 
@@ -205,6 +209,33 @@ class TSC_LoRA_Stacker_Adv:
 
         return (loras,)
 
+#=======================================================================================================================
+# TSC Control Net Stacker
+class TSC_Control_Net_Stacker:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"control_net": ("CONTROL_NET",),
+                         "image": ("IMAGE",),
+                         "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01})},
+                "optional": {"cnet_stack": ("CONTROL_NET_STACK",)},
+                }
+
+    RETURN_TYPES = ("CONTROL_NET_STACK",)
+    RETURN_NAMES = ("CNET_STACK",)
+    FUNCTION = "control_net_stacker"
+    CATEGORY = "Efficiency Nodes/Misc"
+
+    def control_net_stacker(self, control_net, image, strength, cnet_stack=None):
+        # If control_net_stack is None, initialize as an empty list
+        if cnet_stack is None:
+            cnet_stack = []
+
+        # Extend the control_net_stack with the new tuple
+        cnet_stack.extend([(control_net, image, strength)])
+
+        return (cnet_stack,)
+
 ########################################################################################################################
 # TSC KSampler (Efficient)
 class TSC_KSampler:
@@ -229,7 +260,8 @@ class TSC_KSampler:
                      "negative": ("CONDITIONING",),
                      "latent_image": ("LATENT",),
                      "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                     "preview_image": (["Disabled", "Enabled", "Output Only"],),
+                     "preview_method": (["auto", "latent2rgb", "taesd", "none"],),
+                     "vae_decode": (["true", "false", "output only"],),
                      },
                 "optional": { "optional_vae": ("VAE",),
                               "script": ("SCRIPT",),},
@@ -241,11 +273,25 @@ class TSC_KSampler:
     OUTPUT_NODE = True
     FUNCTION = "sample"
     CATEGORY = "Efficiency Nodes/Sampling"
-    
+
     def sample(self, sampler_state, model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-               latent_image, preview_image, denoise=1.0, prompt=None, extra_pnginfo=None, my_unique_id=None,
+               latent_image, preview_method, vae_decode, denoise=1.0, prompt=None, extra_pnginfo=None, my_unique_id=None,
                optional_vae=(None,), script=None, add_noise=None, start_at_step=None, end_at_step=None,
                return_with_leftover_noise=None):
+
+        # Rename the vae variable
+        vae = optional_vae
+
+        # Find instance of ksampler type
+        if add_noise == None:
+            ksampler_adv_flag = False
+        else:
+            ksampler_adv_flag = True
+            
+        # If vae is not connected, disable vae decoding
+        if vae == (None,) and vae_decode != "false":
+            print('\033[33mKSampler(Efficient) Warning:\033[0m No vae input detected, proceeding as if vae_decode was false.\n')
+            vae_decode = "false"
 
         # Extract node_settings from json
         def get_settings():
@@ -273,13 +319,17 @@ class TSC_KSampler:
                 digits = 0
             return (digits, prefix)
 
-        def compute_vars(input):
+        def compute_vars(images,input):
             input = input.replace("%width%", str(images[0].shape[1]))
             input = input.replace("%height%", str(images[0].shape[0]))
             return input
 
         def preview_images(images, filename_prefix):
-            filename_prefix = compute_vars(filename_prefix)
+
+            if images == list():
+                return list()
+
+            filename_prefix = compute_vars(images,filename_prefix)
 
             subfolder = os.path.dirname(os.path.normpath(filename_prefix))
             filename = os.path.basename(os.path.normpath(filename_prefix))
@@ -336,23 +386,20 @@ class TSC_KSampler:
             last_helds[key].append((new_value, my_unique_id))
             return True
 
+        def vae_decode_latent(latent, kse_vae_tiled):
+            return vae.decode_tiled(latent).cpu() if kse_vae_tiled else vae.decode(latent).cpu()
+
         # Clean globally stored objects of non-existant nodes
         globals_cleanup(prompt)
 
         # Convert ID string to an integer
         my_unique_id = int(my_unique_id)
 
-        # Vae input check
-        vae = optional_vae
-        if vae == (None,):
-            print('\033[33mKSampler(Efficient) Warning:\033[0m No vae input detected, preview and output image disabled.\n')
-            preview_image = "Disabled"
-
-        # Init last_results
-        if get_value_by_id("results", my_unique_id) is None:
-            last_results = list()
+        # Init last_preview_images
+        if get_value_by_id("preview_images", my_unique_id) is None:
+            last_preview_images = list()
         else:
-            last_results = get_value_by_id("results", my_unique_id)
+            last_preview_images = get_value_by_id("preview_images", my_unique_id)
 
         # Init last_latent
         if get_value_by_id("latent", my_unique_id) is None:
@@ -361,14 +408,11 @@ class TSC_KSampler:
             last_latent = {"samples": None}
             last_latent["samples"] = get_value_by_id("latent", my_unique_id)
 
-        # Init last_images
-        if get_value_by_id("images", my_unique_id) == None:
-            last_images = TSC_KSampler.empty_image
+        # Init last_output_images
+        if get_value_by_id("output_images", my_unique_id) == None:
+            last_output_images = TSC_KSampler.empty_image
         else:
-            last_images = get_value_by_id("images", my_unique_id)
-
-        # Initialize latent
-        latent: Tensor|None = None
+            last_output_images = get_value_by_id("output_images", my_unique_id)
 
         # Define filename_prefix
         filename_prefix = "KSeff_{:02d}".format(my_unique_id)
@@ -377,8 +421,23 @@ class TSC_KSampler:
         # Check the current sampler state
         if sampler_state == "Sample":
 
-            # Sample using the Comfy KSampler nodes
-            if add_noise==None:
+            # Store the global preview method
+            previous_preview_method = global_preview_method()
+
+            # Change the global preview method temporarily during sampling
+            set_preview_method(preview_method)
+
+            # Define commands arguments to send to front-end via websocket
+            if preview_method != "none":
+                if vae_decode == "true":
+                    sendBlob = False
+                else:
+                    # Send back the last blob image through websocket for display
+                    sendBlob = True
+                send_command_to_frontend(startListening=True, maxCount=steps-1, sendBlob=sendBlob)
+
+            # Sample the latent_image(s) using the Comfy KSampler nodes
+            if ksampler_adv_flag == False:
                 samples = KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
             else:
                 samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler, positive, negative,
@@ -387,76 +446,102 @@ class TSC_KSampler:
             # Extract the latent samples from the returned samples dictionary
             latent = samples[0]["samples"]
 
-            # Store the latent samples in the 'last_helds' dictionary with a unique ID
+            # Cache latent samples in the 'last_helds' dictionary "latent"
             update_value_by_id("latent", my_unique_id, latent)
 
-            # If not in preview mode, return the results in the specified format
-            if preview_image == "Disabled":
+            # Define next Hold's vae_decode behavior
+            if vae_decode == "false":
                 # Enable vae decode on next Hold
-                update_value_by_id("vae_decode", my_unique_id, True)
-                return {"ui": {"images": list()},
-                        "result": (model, positive, negative, {"samples": latent}, vae, TSC_KSampler.empty_image,)}
+                update_value_by_id("vae_decode_flag", my_unique_id, True)
             else:
-                # Decode images and store
-                if kse_vae_tiled == False:
-                    images = vae.decode(latent).cpu()
-                else:
-                    images = vae.decode_tiled(latent).cpu()
-                update_value_by_id("images", my_unique_id, images)
-
                 # Disable vae decode on next Hold
-                update_value_by_id("vae_decode", my_unique_id, False)
+                update_value_by_id("vae_decode_flag", my_unique_id, False)
 
-                # Generate image results and store
-                results = preview_images(images, filename_prefix)
-                update_value_by_id("results", my_unique_id, results)
+            # Define node image outputs
+            if vae_decode == "false":
+                if preview_method == "none":
+                    output_images = TSC_KSampler.empty_image
+                    node_images = list()
+                else:
+                    output_images = node_images = get_latest_image()
 
-                # Determine what the 'images' value should be
-                images_value = list() if preview_image == "Output Only" else results
+            elif vae_decode == "true":
+                decoded_image = vae_decode_latent(latent, kse_vae_tiled)
+                if preview_method == "none":
+                    output_images = node_images = decoded_image
+                else:
+                    output_images = node_images = decoded_image
 
-                # Output image results to ui and node outputs
-                return {"ui": {"images": images_value},
-                        "result": (model, positive, negative, {"samples": latent}, vae, images,)}
+            elif vae_decode == "output only":
+                decoded_image = vae_decode_latent(latent, kse_vae_tiled)
+                if preview_method == "none":
+                    output_images = decoded_image
+                    node_images = list()
+                else:
+                    output_images = decoded_image
+                    node_images = get_latest_image()
 
+            # Cache output images to global 'last_helds' dictionary "output_images"
+            update_value_by_id("output_images", my_unique_id, output_images)
+
+            # Generate preview_images (PIL)
+            preview_images = preview_images(node_images, filename_prefix)
+
+            # Cache node preview images to global 'last_helds' dictionary "preview_images"
+            update_value_by_id("preview_images", my_unique_id, preview_images)
+
+            # Set xy_plot_flag to 'False' and set the stored (if any) XY Plot image tensor to 'None'
+            update_value_by_id("xy_plot_flag", my_unique_id, False)
+            update_value_by_id("xy_plot_image", my_unique_id, None)
+            
+            if preview_method != "none":
+                # Send message to front-end to revoke the last blob image from browser's memory (fixes preview duplication bug)
+                send_command_to_frontend(startListening=False)
+                
+            return {"ui": {"images": preview_images},
+                    "result": (model, positive, negative, {"samples": latent}, vae, output_images,)}
 
         # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
         # If the sampler state is "Hold"
         elif sampler_state == "Hold":
 
-            # If not in preview mode, return the results in the specified format
-            if preview_image == "Disabled":
-                return {"ui": {"images": list()},
-                        "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
+            if get_value_by_id("vae_decode_flag", my_unique_id):
+                if vae_decode in ["true", "output only"]:
+                    output_images = node_images = vae_decode_latent(last_latent["samples"], kse_vae_tiled)
+                    update_value_by_id("vae_decode_flag", my_unique_id, False)
+                    update_value_by_id("output_images", my_unique_id, output_images)
 
-            else:
-                latent = last_latent["samples"]
-
-                if get_value_by_id("vae_decode", my_unique_id) == True:
-
-                    # Decode images and store
-                    if kse_vae_tiled == False:
-                        images = vae.decode(latent).cpu()
-                    else:
-                        images = vae.decode_tiled(latent).cpu()
-                    update_value_by_id("images", my_unique_id, images)
-
-                    # Disable vae decode on next Hold
-                    update_value_by_id("vae_decode", my_unique_id, False)
-
-                    # Generate image results and store
-                    results = preview_images(images, filename_prefix)
-                    update_value_by_id("results", my_unique_id, results)
-
+                    if vae_decode == "true":
+                        preview_images = preview_images(node_images, filename_prefix)
+                        update_value_by_id("preview_images", my_unique_id, preview_images)
+                    else:  # image output only
+                        preview_images = last_preview_images
                 else:
-                    images = last_images
-                    results = last_results
+                    output_images = last_output_images
+                    preview_images = last_preview_images
 
-                # Determine what the 'images' value should be
-                images_value = list() if preview_image == "Output Only" else results
+            # Check if holding an XY Plot image
+            elif get_value_by_id("xy_plot_flag", my_unique_id):
+                # Extract the name of the node connected to script input
+                script_node_name, _ = extract_node_info(prompt, my_unique_id, 'script')
+                if script_node_name == "XY Plot":
+                    # Extract the 'xyplot_as_output_image' input parameter from the connected xy_plot
+                    _, _, _, _, _, _, _, xyplot_as_output_image, _ = script
+                    if xyplot_as_output_image == True:
+                        output_images = get_value_by_id("xy_plot_image", my_unique_id)
+                    else:
+                        output_images = get_value_by_id("output_images", my_unique_id)
+                    preview_images = last_preview_images #if vae_decode == "true" else list()
+                else:
+                    output_images = last_output_images
+                    preview_images = last_preview_images if vae_decode == "true" else list()
+                    
+            else:
+                output_images = last_output_images
+                preview_images = last_preview_images if vae_decode == "true" else list()
 
-                # Output image results to ui and node outputs
-                return {"ui": {"images": images_value},
-                        "result": (model, positive, negative, {"samples": latent}, vae, images,)}
+            return {"ui": {"images": preview_images},
+                    "result": (model, positive, negative, {"samples": last_latent["samples"]}, vae, output_images,)}
 
         # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
         elif sampler_state == "Script":
@@ -469,18 +554,18 @@ class TSC_KSampler:
                 if script_node_name!="XY Plot":
                     print('\033[31mKSampler(Efficient) Error:\033[0m No valid script input detected')
                 return {"ui": {"images": list()},
-                        "result": (model, positive, negative, last_latent, vae, last_images,)}
+                        "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
 
             # If no vae connected, throw errors
             if vae == (None,):
-                print('\033[31mKSampler(Efficient) Error:\033[0m VAE must be connected to use Script mode.')
+                print('\033[31mKSampler(Efficient) Error:\033[0m VAE input must be connected in order to use the XY Plotter.')
                 return {"ui": {"images": list()},
-                        "result": (model, positive, negative, last_latent, vae, last_images,)}
+                        "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
 
-            # If preview_image set to disabled, run script anyways with message
-            if preview_image == "Disabled":
-                print('\033[33mKSampler(Efficient) Warning:\033[0m The preview image cannot be disabled when running'
-                      ' the XY Plot script, proceeding as if it was enabled.\n')
+            # If vae_decode is not set to true, print message that changing it to true
+            if vae_decode != "true":
+                print('\033[33mKSampler(Efficient) Warning:\033[0m VAE decoding must be set to \'true\''
+                    ' for XY Plot script, proceeding as if \'true\'.\n')
 
             # Extract the 'samples' tensor and split it into individual image tensors
             image_tensors = torch.split(latent_image['samples'], 1, dim=0)
@@ -502,22 +587,63 @@ class TSC_KSampler:
                 vae_name = None
                 ckpt_name = None
                 clip = None
-                lora_params = None
+                clip_skip = None
                 positive_prompt = None
                 negative_prompt = None
-                clip_skip = None
+                lora_stack = None
+                cnet_stack = None
 
                 # Unpack script Tuple (X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, dependencies)
                 X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models, xyplot_as_output_image, dependencies = script
 
+                #_______________________________________________________________________________________________________
+                # The below section is used to check wether the XY_type is allowed for the Ksampler instance being used.
+                # If not the correct type, this section will abort the xy plot script.
+                
+                # Define disallowed XY_types for each ksampler type
+                disallowed_ksampler_types = ["AddNoise", "ReturnNoise", "StartStep", "EndStep"]
+                disallowed_ksamplerAdv_types = ["Denoise"]
+
+                # Check against the relevant disallowed values array based on ksampler_adv_flag
+                current_disallowed_values = disallowed_ksamplerAdv_types if ksampler_adv_flag else disallowed_ksampler_types
+
+                # Print error and exit
+                if X_type in current_disallowed_values or Y_type in current_disallowed_values:
+                    error_prefix = '\033[31mKSampler Adv.(Efficient) Error:\033[0m' \
+                        if ksampler_adv_flag else '\033[31mKSampler(Efficient) Error:\033[0m'
+
+                    # Determine which type failed
+                    failed_type = None
+                    if X_type in current_disallowed_values:
+                        failed_type = f"X_type: '{X_type}'"
+                    if Y_type in current_disallowed_values:
+                        if failed_type:
+                            failed_type += f" and Y_type: '{Y_type}'"
+                        else:
+                            failed_type = f"Y_type: '{Y_type}'"
+
+                    # Suggest alternative KSampler
+                    suggested_ksampler = "KSampler(Efficient)" if ksampler_adv_flag else "KSampler Adv.(Efficient)"
+
+                    print(f"{error_prefix} Invalid value for {failed_type}. Use {suggested_ksampler} for this XY Plot type."
+                          f"\nDisallowed XY_types for this KSampler are: {', '.join(current_disallowed_values)}.")
+
+                    return {"ui": {"images": list()},
+                            "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
+
+                #_______________________________________________________________________________________________________
                 # Unpack Effficient Loader dependencies
                 if dependencies is not None:
-                    vae_name, ckpt_name, clip, clip_skip, positive_prompt, negative_prompt, lora_params = dependencies
+                    vae_name, ckpt_name, clip, clip_skip, positive_prompt, negative_prompt, lora_stack, cnet_stack = dependencies
 
                 # Helper function to process printout values
                 def process_xy_for_print(value, replacement, type_):
                     if isinstance(value, tuple) and type_ == "Scheduler":
                         return value[0]  # Return only the first entry of the tuple
+                    elif type_ == "ControlNetStr" and isinstance(value, list):
+                        # Extract the first inner array of each entry and then get the third entry of its tuple
+                        return [round(inner_list[0][2], 3) for inner_list in value if
+                                inner_list and isinstance(inner_list[0], tuple) and len(inner_list[0]) == 3]
                     elif isinstance(value, tuple):
                         return tuple(replacement if v is None else v for v in value)
                     else:
@@ -528,8 +654,8 @@ class TSC_KSampler:
                 replacement_Y = scheduler if Y_type == 'Sampler' else clip_skip if Y_type == 'Checkpoint' else None
 
                 # Process X_value and Y_value
-                X_value_processed = [process_xy_for_print(v, replacement_X, X_type) for v in X_value]
-                Y_value_processed = [process_xy_for_print(v, replacement_Y, Y_type) for v in Y_value]
+                X_value_processed = process_xy_for_print(X_value, replacement_X, X_type)
+                Y_value_processed = process_xy_for_print(Y_value, replacement_Y, Y_type)
 
                 # Print XY Plot Inputs
                 print("-" * 40)
@@ -589,10 +715,10 @@ class TSC_KSampler:
 
                 # If both ckpt_dict and lora_dict are not empty, manipulate lora_dict as described
                 if ckpt_dict and lora_dict:
-                    lora_dict = [(lora_params, ckpt) for ckpt in ckpt_dict for lora_params in lora_dict]
+                    lora_dict = [(lora_stack, ckpt) for ckpt in ckpt_dict for lora_stack in lora_dict]
                 # If lora_dict is not empty and ckpt_dict is empty, insert ckpt_name into each tuple in lora_dict
                 elif lora_dict:
-                    lora_dict = [(lora_params, ckpt_name) for lora_params in lora_dict]
+                    lora_dict = [(lora_stack, ckpt_name) for lora_stack in lora_dict]
 
                 vae_dict = dict_map.get("VAE", [])
 
@@ -613,27 +739,48 @@ class TSC_KSampler:
 
                 #_______________________________________________________________________________________________________
                 # Function that changes appropiate variables for next processed generations (also generates XY_labels)
-                def define_variable(var_type, var, seed, steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                    clip_skip, positive_prompt, negative_prompt, lora_params, var_label, num_label):
+                def define_variable(var_type, var, add_noise, seed, steps, start_at_step, end_at_step,
+                                    return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
+                                    clip_skip, positive_prompt, negative_prompt, lora_stack, cnet_stack, var_label, num_label):
 
                     # Define default max label size limit
                     max_label_len = 36
 
-                    # If var_type is "Seeds++ Batch", update var and seed, and generate labels
-                    if var_type == "Seeds++ Batch":
+                    # If var_type is "AddNoise", update 'add_noise' with 'var', and generate text label
+                    if var_type == "AddNoise":
+                        add_noise = var
+                        text = f"AddNoise: {add_noise}"
+
+                    # If var_type is "Seeds++ Batch", generate text label
+                    elif var_type == "Seeds++ Batch":
                         text = f"Seed: {seed}"
 
-                    # If var_type is "Steps", update steps and generate labels
+                    # If var_type is "Steps", update 'steps' with 'var' and generate text label
                     elif var_type == "Steps":
                         steps = var
-                        text = f"steps: {steps}"
+                        text = f"Steps: {steps}"
 
-                    # If var_type is "CFG Scale", update cfg and generate labels
+                    # If var_type is "StartStep", update 'start_at_step' with 'var' and generate text label
+                    elif var_type == "StartStep":
+                        start_at_step = var
+                        text = f"StartStep: {start_at_step}"
+
+                    # If var_type is "EndStep", update 'end_at_step' with 'var' and generate text label
+                    elif var_type == "EndStep":
+                        end_at_step = var
+                        text = f"EndStep: {end_at_step}"
+
+                    # If var_type is "ReturnNoise", update 'return_with_leftover_noise' with 'var', and generate text label
+                    elif var_type == "ReturnNoise":
+                        return_with_leftover_noise = var
+                        text = f"ReturnNoise: {return_with_leftover_noise}"
+
+                    # If var_type is "CFG Scale", update cfg with var and generate text label
                     elif var_type == "CFG Scale":
                         cfg = var
                         text = f"CFG: {round(cfg,2)}"
 
-                    # If var_type is "Sampler", update sampler_name, scheduler, and generate labels
+                    # If var_type is "Sampler", update sampler_name and scheduler with var, and generate text label
                     elif var_type == "Sampler":
                         sampler_name = var[0]
                         if var[1] == "":
@@ -659,7 +806,7 @@ class TSC_KSampler:
                     # If var_type is "Denoise", update denoise and generate labels
                     elif var_type == "Denoise":
                         denoise = var
-                        text = f"denoise: {round(denoise, 2)}"
+                        text = f"Denoise: {round(denoise, 2)}"
 
                     # If var_type is "VAE", update vae_name and generate labels
                     elif var_type == "VAE":
@@ -699,13 +846,13 @@ class TSC_KSampler:
 
                     elif var_type == "Clip Skip":
                         clip_skip = (var, clip_skip[1])
-                        text = f"Clip Skip ({clip_skip[0]})"
+                        text = f"ClipSkip ({clip_skip[0]})"
 
                     elif var_type == "LoRA":
-                        lora_params = var
-                        max_label_len = 30 + (12 * (len(lora_params)-1))
-                        if len(lora_params) == 1:
-                            lora_name, lora_model_wt, lora_clip_wt = lora_params[0]
+                        lora_stack = var
+                        max_label_len = 30 + (12 * (len(lora_stack)-1))
+                        if len(lora_stack) == 1:
+                            lora_name, lora_model_wt, lora_clip_wt = lora_stack[0]
                             lora_filename = os.path.splitext(os.path.basename(lora_name))[0]
                             lora_model_wt = format(float(lora_model_wt), ".2f").rstrip('0').rstrip('.')
                             lora_clip_wt = format(float(lora_clip_wt), ".2f").rstrip('0').rstrip('.')
@@ -714,17 +861,22 @@ class TSC_KSampler:
                                 text = f"LoRA: {lora_filename}({lora_model_wt})"
                             else:
                                 text = f"LoRA: {lora_filename}({lora_model_wt},{lora_clip_wt})"
-                        elif len(lora_params) > 1:
-                            lora_filenames = [os.path.splitext(os.path.basename(lora_name))[0] for lora_name, _, _ in lora_params]
+                        elif len(lora_stack) > 1:
+                            lora_filenames = [os.path.splitext(os.path.basename(lora_name))[0] for lora_name, _, _ in lora_stack]
                             lora_details = [(format(float(lora_model_wt), ".2f").rstrip('0').rstrip('.'),
-                                             format(float(lora_clip_wt), ".2f").rstrip('0').rstrip('.')) for _, lora_model_wt, lora_clip_wt in lora_params]
-                            non_name_length = sum(len(f"({lora_details[i][0]},{lora_details[i][1]})") + 2 for i in range(len(lora_params)))
+                                             format(float(lora_clip_wt), ".2f").rstrip('0').rstrip('.')) for _, lora_model_wt, lora_clip_wt in lora_stack]
+                            non_name_length = sum(len(f"({lora_details[i][0]},{lora_details[i][1]})") + 2 for i in range(len(lora_stack)))
                             available_space = max_label_len - non_name_length
-                            max_name_length = available_space // len(lora_params)
+                            max_name_length = available_space // len(lora_stack)
                             lora_filenames = [filename[:max_name_length] for filename in lora_filenames]
                             text_elements = [f"{lora_filename}({lora_details[i][0]})" if lora_details[i][0] == lora_details[i][1] else f"{lora_filename}({lora_details[i][0]},{lora_details[i][1]})" for i, lora_filename in enumerate(lora_filenames)]
                             text = " ".join(text_elements)
-                    else:
+                            
+                    elif var_type == "ControlNetStr":
+                        cnet_stack = var
+                        text = f'ControlNetStr: {round(cnet_stack[0][2], 3)}'
+
+                    else: # No matching type found
                         text=""
 
                     def truncate_texts(texts, num_label, max_label_len):
@@ -742,19 +894,28 @@ class TSC_KSampler:
                         var_label = truncate_texts(var_label, num_label, max_label_len)
 
                     # Return the modified variables
-                    return steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, \
-                        positive_prompt, negative_prompt, lora_params, var_label
+                    return add_noise, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
+                        sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, \
+                        positive_prompt, negative_prompt, lora_stack, cnet_stack, var_label
 
-                # _______________________________________________________________________________________________________
+                #_______________________________________________________________________________________________________
                 # The function below is used to smartly load Checkpoint/LoRA/VAE models between generations.
                 def define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip, vae,
-                                 vae_name, ckpt_name, lora_params, index, types, script_node_id, cache):
+                                 vae_name, ckpt_name, lora_stack, cnet_stack, index, types, script_node_id, cache):
         
-                    # Encode prompt and apply clip_skip. Return new conditioning.
-                    def encode_prompt(positive_prompt, negative_prompt, clip, clip_skip):
+                    # Encode prompt, apply clip_skip, and Control Net (if given). Return new conditioning.
+                    def encode_prompt(positive_prompt, negative_prompt, clip, clip_skip, cnet_stack):
                         clip = CLIPSetLastLayer().set_last_layer(clip, clip_skip)[0]
                         positive_encoded = CLIPTextEncode().encode(clip, positive_prompt)[0]
                         negative_encoded = CLIPTextEncode().encode(clip, negative_prompt)[0]
+
+                        # Recursively apply Control Net to the positive encoding for each entry in the stack
+                        if cnet_stack is not None:
+                            for control_net_tuple in cnet_stack:
+                                control_net, image, strength = control_net_tuple
+                                positive_encoded = \
+                                ControlNetApply().apply_controlnet(positive_encoded, control_net, image, strength)[0]
+
                         return positive_encoded, negative_encoded
 
                     # Variable to track wether to encode prompt or not
@@ -771,42 +932,46 @@ class TSC_KSampler:
 
                     # Load Checkpoint if required. If Y_type is LoRA, required models will be loaded by load_lora func.
                     if (X_type == "Checkpoint" and index == 0 and Y_type != "LoRA"):
-                        if lora_params is None:
+                        if lora_stack is None:
                             model, clip, _ = load_checkpoint(ckpt_name, script_node_id, output_vae=False, cache=cache[1])
                         else: # Load Efficient Loader LoRA
-                            model, clip = load_lora(lora_params, ckpt_name, script_node_id,
+                            model, clip = load_lora(lora_stack, ckpt_name, script_node_id,
                                                     cache=None, ckpt_cache=cache[1])
                         encode = True
 
                     # Load LoRA if required
                     elif (X_type == "LoRA" and index == 0):
                         # Don't cache Checkpoints
-                        model, clip = load_lora(lora_params, ckpt_name, script_node_id, cache=cache[2])
+                        model, clip = load_lora(lora_stack, ckpt_name, script_node_id, cache=cache[2])
                         encode = True
                         
                     elif Y_type == "LoRA":  # X_type must be Checkpoint, so cache those as defined
-                        model, clip = load_lora(lora_params, ckpt_name, script_node_id,
+                        model, clip = load_lora(lora_stack, ckpt_name, script_node_id,
                                                 cache=None, ckpt_cache=cache[1])
                         encode = True
 
                     # Encode Prompt if required
-                    prompt_types = ["Positive Prompt S/R", "Negative Prompt S/R", "Clip Skip"]
+                    prompt_types = ["Positive Prompt S/R", "Negative Prompt S/R", "Clip Skip", "ControlNetStr"]
                     if (X_type in prompt_types and index == 0) or Y_type in prompt_types:
                         encode = True
 
-                    # Encode prompt if needed
+                    # Encode prompt if encode == True
                     if encode == True:
-                        positive, negative = encode_prompt(positive_prompt[0], negative_prompt[0], clip, clip_skip)
+                        positive, negative = encode_prompt(positive_prompt[0], negative_prompt[0], clip, clip_skip, cnet_stack)
                         
                     return model, positive, negative, vae
 
                 # ______________________________________________________________________________________________________
                 # The below function is used to generate the results based on all the processed variables
-                def process_values(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
-                                   denoise, vae, latent_list=[], image_tensor_list=[], image_pil_list=[]):
+                def process_values(model, add_noise, seed, steps, start_at_step, end_at_step, return_with_leftover_noise,
+                                   cfg, sampler_name, scheduler, positive, negative, latent_image, denoise, vae,
+                                   ksampler_adv_flag, latent_list=[], image_tensor_list=[], image_pil_list=[]):
+
+                    if preview_method != "none":
+                        send_command_to_frontend(startListening=True, maxCount=steps - 1, sendBlob=False)
 
                     # Sample using the Comfy KSampler nodes
-                    if add_noise == None:
+                    if ksampler_adv_flag == False:
                         samples = KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler,
                                                     positive, negative, latent_image, denoise=denoise)
                     else:
@@ -854,6 +1019,12 @@ class TSC_KSampler:
                 # Store types in a Tuple for easy function passing
                 types = (X_type, Y_type)
 
+                # Store the global preview method
+                previous_preview_method = global_preview_method()
+
+                # Change the global preview method temporarily during this node's execution
+                set_preview_method(preview_method)
+
                 # Fill Plot Rows (X)
                 for X_index, X in enumerate(X_value):
 
@@ -863,22 +1034,25 @@ class TSC_KSampler:
                         seed_updated = seed + X_index
 
                     # Define X parameters and generate labels
-                    steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, positive_prompt, negative_prompt, \
-                        lora_params, X_label = \
-                        define_variable(X_type, X, seed_updated, steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                        clip_skip, positive_prompt, negative_prompt, lora_params, X_label, len(X_value))
+                    add_noise, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
+                        sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip,\
+                        positive_prompt, negative_prompt, lora_stack, cnet_stack, X_label = \
+                        define_variable(X_type, X, add_noise, seed_updated, steps, start_at_step, end_at_step,
+                                        return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name,
+                                        ckpt_name, clip_skip, positive_prompt, negative_prompt, lora_stack, cnet_stack, X_label, len(X_value))
 
                     if X_type != "Nothing" and Y_type == "Nothing":
 
                         # Models & Conditionings
                         model, positive, negative , vae = \
                             define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip[0], vae,
-                                         vae_name, ckpt_name, lora_params, 0, types, script_node_id, cache)
+                                         vae_name, ckpt_name, lora_stack, cnet_stack, 0, types, script_node_id, cache)
 
                         # Generate Results
                         latent_list, image_tensor_list, image_pil_list = \
-                            process_values(model, seed_updated, steps, cfg, sampler_name, scheduler[0],
-                                           positive, negative, latent_image, denoise, vae)
+                            process_values(model, add_noise, seed_updated, steps, start_at_step, end_at_step,
+                                           return_with_leftover_noise, cfg, sampler_name, scheduler[0],
+                                           positive, negative, latent_image, denoise, vae, ksampler_adv_flag)
 
                     elif X_type != "Nothing" and Y_type != "Nothing":
                         # Seed control based on loop index during Batch
@@ -889,19 +1063,23 @@ class TSC_KSampler:
                                 seed_updated = seed + Y_index
 
                             # Define Y parameters and generate labels
-                            steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, positive_prompt, negative_prompt, lora_params, Y_label = \
-                                define_variable(Y_type, Y, seed_updated, steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                                clip_skip, positive_prompt, negative_prompt, lora_params, Y_label, len(Y_value))
+                            add_noise, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
+                                sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip,\
+                                positive_prompt, negative_prompt, lora_stack, cnet_stack, Y_label = \
+                                define_variable(Y_type, Y, add_noise, seed_updated, steps, start_at_step, end_at_step,
+                                                return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
+                                                clip_skip, positive_prompt, negative_prompt, lora_stack, cnet_stack, Y_label, len(Y_value))
 
                             # Models & Conditionings
                             model, positive, negative, vae = \
                                 define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip[0], vae,
-                                         vae_name, ckpt_name, lora_params, Y_index, types, script_node_id, cache)
+                                         vae_name, ckpt_name, lora_stack, cnet_stack, Y_index, types, script_node_id, cache)
 
                             # Generate Results
                             latent_list, image_tensor_list, image_pil_list = \
-                                process_values(model, seed_updated, steps, cfg, sampler_name, scheduler[0],
-                                               positive, negative, latent_image, denoise, vae)
+                                process_values(model, add_noise, seed_updated, steps, start_at_step, end_at_step,
+                                               return_with_leftover_noise, cfg, sampler_name, scheduler[0],
+                                               positive, negative, latent_image, denoise, vae, ksampler_adv_flag)
 
                 # Clean up cache
                 if cache_models == "False":
@@ -915,9 +1093,9 @@ class TSC_KSampler:
                         clear_cache_by_exception(script_node_id, lora_dict=[])
 
                 # ______________________________________________________________________________________________________
-                def print_plot_variables(X_type, Y_type, X_value, Y_value, seed, ckpt_name, lora_params,
-                                         vae_name, clip_skip, steps, cfg, sampler_name, scheduler, denoise,
-                                         num_rows, num_cols, latent_height, latent_width):
+                def print_plot_variables(X_type, Y_type, X_value, Y_value, add_noise, seed, steps, start_at_step, end_at_step,
+                                         return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
+                                         clip_skip, lora_stack, ksampler_adv_flag, num_rows, num_cols, latent_height, latent_width):
 
                     print("-" * 40)  # Print an empty line followed by a separator line
                     print("\033[32mXY Plot Results:\033[0m")
@@ -953,10 +1131,10 @@ class TSC_KSampler:
 
                         return ckpt_name, clip_skip
 
-                    def get_lora_name(X_type, Y_type, X_value, Y_value, lora_params=None):
+                    def get_lora_name(X_type, Y_type, X_value, Y_value, lora_stack=None):
                         if X_type != "LoRA" and Y_type != "LoRA":
-                            if lora_params:
-                                return f"[{', '.join([f'{os.path.splitext(os.path.basename(name))[0]}({round(model_wt, 3)},{round(clip_wt, 3)})' for name, model_wt, clip_wt in lora_params])}]"
+                            if lora_stack:
+                                return f"[{', '.join([f'{os.path.splitext(os.path.basename(name))[0]}({round(model_wt, 3)},{round(clip_wt, 3)})' for name, model_wt, clip_wt in lora_stack])}]"
                             else:
                                 return None
                         else:
@@ -964,29 +1142,48 @@ class TSC_KSampler:
                                                          X_value) if X_type == "LoRA" else get_lora_sublist_name(Y_type, Y_value) if Y_type == "LoRA" else None
 
                     def get_lora_sublist_name(lora_type, lora_value):
-                        return ", ".join([
-                                             f"[{', '.join([f'{os.path.splitext(os.path.basename(str(x[0])))[0]}({round(x[1], 3)},{round(x[2], 3)})' for x in sublist])}]"
+                        return ", ".join([f"[{', '.join([f'{os.path.splitext(os.path.basename(str(x[0])))[0]}({round(x[1], 3)},{round(x[2], 3)})' for x in sublist])}]"
                                              for sublist in lora_value])
 
-                    # use these functions:
+                    # VAE, Checkpoint, Clip Skip, LoRA
                     ckpt_type, clip_skip_type = (X_type, Y_type) if X_type in ["Checkpoint", "Clip Skip"] else (Y_type, X_type)
                     ckpt_values, clip_skip_values = (X_value, Y_value) if X_type in ["Checkpoint", "Clip Skip"] else (Y_value, X_value)
 
                     clip_skip = get_clip_skip(X_type, Y_type, X_value, Y_value, clip_skip)
                     ckpt_name, clip_skip = get_checkpoint_name(ckpt_type, ckpt_values, clip_skip_type, clip_skip_values, ckpt_name, clip_skip)
                     vae_name = get_vae_name(X_type, Y_type, X_value, Y_value, vae_name)
-                    lora_name = get_lora_name(X_type, Y_type, X_value, Y_value, lora_params)
+                    lora_name = get_lora_name(X_type, Y_type, X_value, Y_value, lora_stack)
 
+                    # AddNoise
+                    add_noise = ", ".join(map(str, X_value)) if X_type == "AddNoise" else ", ".join(
+                        map(str, Y_value)) if Y_type == "AddNoise" else add_noise
+
+                    # Seeds++ Batch
                     seed_list = [seed + x for x in X_value] if X_type == "Seeds++ Batch" else\
                         [seed + y for y in Y_value] if Y_type == "Seeds++ Batch" else [seed]
                     seed = ", ".join(map(str, seed_list))
 
+                    # Steps
                     steps = ", ".join(map(str, X_value)) if X_type == "Steps" else ", ".join(
                         map(str, Y_value)) if Y_type == "Steps" else steps
 
+                    # StartStep
+                    start_at_step = ", ".join(map(str, X_value)) if X_type == "StartStep" else ", ".join(
+                        map(str, Y_value)) if Y_type == "StartStep" else start_at_step
+
+                    # EndStep
+                    end_at_step = ", ".join(map(str, X_value)) if X_type == "EndStep" else ", ".join(
+                        map(str, Y_value)) if Y_type == "EndStep" else end_at_step
+
+                    # ReturnNoise
+                    return_with_leftover_noise = ", ".join(map(str, X_value)) if X_type == "ReturnNoise" else ", ".join(
+                        map(str, Y_value)) if Y_type == "ReturnNoise" else return_with_leftover_noise
+
+                    # CFG
                     cfg = ", ".join(map(str, X_value)) if X_type == "CFG Scale" else ", ".join(
                         map(str, Y_value)) if Y_type == "CFG Scale" else cfg
 
+                    # Sampler/Scheduler
                     if X_type == "Sampler":
                         if Y_type == "Scheduler":
                             sampler_name = ", ".join([f"{x[0]}" for x in X_value])
@@ -1022,15 +1219,22 @@ class TSC_KSampler:
                     if lora_name:
                         print(f"lora(mod,clip): {lora_name if lora_name is not None else ''}")
                     print(f"vae: {vae_name if vae_name is not None else ''}")
+                    if ksampler_adv_flag == True:
+                        print(f"add_noise: {add_noise}")
                     print(f"seed: {seed}")
                     print(f"steps: {steps}")
+                    if ksampler_adv_flag == True:
+                        print(f"start_at_step: {start_at_step}")
+                        print(f"end_at_step: {end_at_step}")
+                        print(f"return_noise: {return_with_leftover_noise}")
                     print(f"cfg: {cfg}")
                     if scheduler == "_":
                         print(f"sampler(schr): {sampler_name}")
                     else:
                         print(f"sampler: {sampler_name}")
                         print(f"scheduler: {scheduler}")
-                    print(f"denoise: {denoise}")
+                    if ksampler_adv_flag == False:
+                        print(f"denoise: {denoise}")
 
                     if X_type == "Positive Prompt S/R" or Y_type == "Positive Prompt S/R":
                         positive_prompt = ", ".join([str(x[0]) if i == 0 else str(x[1]) for i, x in enumerate(
@@ -1045,6 +1249,17 @@ class TSC_KSampler:
                             [str(y[0]) if i == 0 else str(y[1]) for i, y in
                              enumerate(Y_value)]) if Y_type == "Negative Prompt S/R" else negative_prompt
                         print(f"-prompt_s/r: {negative_prompt}")
+
+                    if X_type == "ControlNetStr":
+                        control_net_str = [str(round(inner_list[0][2], 3)) for inner_list in X_value if
+                                           isinstance(inner_list, list) and
+                                           inner_list and isinstance(inner_list[0], tuple) and len(inner_list[0]) >= 3]
+                        print(f"control_net_str: {', '.join(control_net_str)}")
+                    elif Y_type == "ControlNetStr":
+                        control_net_str = [str(round(inner_list[0][2], 3)) for inner_list in Y_value if
+                                           isinstance(inner_list, list) and
+                                           inner_list and isinstance(inner_list[0], tuple) and len(inner_list[0]) >= 3]
+                        print(f"control_net_str: {', '.join(control_net_str)}")
 
                 # ______________________________________________________________________________________________________
                 def adjusted_font_size(text, initial_font_size, latent_width):
@@ -1062,7 +1277,7 @@ class TSC_KSampler:
                 # ______________________________________________________________________________________________________
                 
                 # Disable vae decode on next Hold
-                update_value_by_id("vae_decode", my_unique_id, False)
+                update_value_by_id("vae_decode_flag", my_unique_id, False)
 
                 def rearrange_list_A(arr, num_cols, num_rows):
                     new_list = []
@@ -1097,9 +1312,9 @@ class TSC_KSampler:
                     latent_list = rearrange_list_A(latent_list, num_cols, num_rows)
 
                 # Print XY Plot Results
-                print_plot_variables(X_type, Y_type, X_value, Y_value, seed, ckpt_name, lora_params, vae_name,
-                                     clip_skip, steps, cfg, sampler_name, scheduler, denoise,
-                                     num_rows, num_cols, latent_height, latent_width)
+                print_plot_variables(X_type, Y_type, X_value, Y_value, add_noise, seed,  steps, start_at_step, end_at_step,
+                                     return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
+                                     clip_skip, lora_stack, ksampler_adv_flag, num_rows, num_cols, latent_height, latent_width)
 
                 # Concatenate the tensors along the first dimension (dim=0)
                 latent_list = torch.cat(latent_list, dim=0)
@@ -1247,18 +1462,23 @@ class TSC_KSampler:
                     # Update the y_offset
                     y_offset += img.height + grid_spacing
 
-                images = pil2tensor(background)
+                xy_plot_image = pil2tensor(background)
 
-             # Generate image results and store
-            results = preview_images(images, filename_prefix)
-            update_value_by_id("results", my_unique_id, results)
+            # Set xy_plot_flag to 'True' and cache the xy_plot_image tensor
+            update_value_by_id("xy_plot_image", my_unique_id, xy_plot_image)
+            update_value_by_id("xy_plot_flag", my_unique_id, True)
 
-            # Squeeze and Stack the tensors, and store results
-            if xyplot_as_output_image == False:
-                image_tensor_list = torch.stack([tensor.squeeze() for tensor in image_tensor_list])
-            else:
-                image_tensor_list = images
-            update_value_by_id("images", my_unique_id, image_tensor_list)
+             # Generate the preview_images and cache results
+            preview_images = preview_images(xy_plot_image, filename_prefix)
+            update_value_by_id("preview_images", my_unique_id, preview_images)
+
+            # Generate output_images and cache results
+            output_images = torch.stack([tensor.squeeze() for tensor in image_tensor_list])
+            update_value_by_id("output_images", my_unique_id, output_images)
+
+            # Set the output_image the same as plot image defined by 'xyplot_as_output_image'
+            if xyplot_as_output_image == True:
+                output_images = xy_plot_image
 
             # Print cache if set to true
             if cache_models == "True":
@@ -1266,13 +1486,17 @@ class TSC_KSampler:
 
             print("-" * 40)  # Print an empty line followed by a separator line
 
-            images = list() if preview_image == "Output Only" else results
+            # Set the preview method back to its original state
+            set_preview_method(previous_preview_method)
 
-            return {
-                "ui": {"images": images},
-                "result": (model, positive, negative, {"samples": latent_list}, vae, image_tensor_list,)
-            }
+            if preview_method != "none":
+                # Send message to front-end to revoke the last blob image from browser's memory (fixes preview duplication bug)
+                send_command_to_frontend(startListening=False)
 
+            return {"ui": {"images": preview_images},
+                    "result": (model, positive, negative, {"samples": latent_list}, vae, output_images,)}
+
+#=======================================================================================================================
 # TSC KSampler Adv (Efficient)
 class TSC_KSamplerAdvanced(TSC_KSampler):
 
@@ -1293,7 +1517,8 @@ class TSC_KSamplerAdvanced(TSC_KSampler):
                      "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
                      "end_at_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
                      "return_with_leftover_noise": (["disable", "enable"],),
-                     "preview_image": (["Disabled", "Enabled", "Output Only"],),
+                     "preview_method": (["auto", "latent2rgb", "taesd", "none"],),
+                     "vae_decode": (["true", "false",  "output only"],),
                      },
                 "optional": {"optional_vae": ("VAE",),
                              "script": ("SCRIPT",), },
@@ -1307,11 +1532,11 @@ class TSC_KSamplerAdvanced(TSC_KSampler):
     CATEGORY = "Efficiency Nodes/Sampling"
 
     def sampleadv(self, sampler_state, model, add_noise, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative,
-               latent_image, start_at_step, end_at_step, return_with_leftover_noise, preview_image,
+               latent_image, start_at_step, end_at_step, return_with_leftover_noise, preview_method, vae_decode,
                prompt=None, extra_pnginfo=None, my_unique_id=None, optional_vae=(None,), script=None):
 
         return super().sample(sampler_state, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative,
-               latent_image, preview_image, denoise=1.0, prompt=prompt, extra_pnginfo=extra_pnginfo, my_unique_id=my_unique_id,
+               latent_image, preview_method, vae_decode, denoise=1.0, prompt=prompt, extra_pnginfo=extra_pnginfo, my_unique_id=my_unique_id,
                optional_vae=optional_vae, script=script, add_noise=add_noise, start_at_step=start_at_step,end_at_step=end_at_step,
                        return_with_leftover_noise=return_with_leftover_noise)
 
@@ -1400,7 +1625,7 @@ class TSC_XYplot:
         return ((X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models,
                  xyplot_as_output_image, dependencies),)
 
-
+#=======================================================================================================================
 # TSC XY Plot: Seeds Values
 class TSC_XYplot_SeedsBatch:
 
@@ -1422,18 +1647,42 @@ class TSC_XYplot_SeedsBatch:
         xy_value = [batch_count]
         return ((xy_type, xy_value),)
 
+#=======================================================================================================================
+# TSC XY Plot: Add/Return Noise
+class TSC_XYplot_AddReturnNoise:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+                    "XY_type": (["add_noise", "return_with_leftover_noise"],)}
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, XY_type):
+        type_mapping = {
+            "add_noise": "AddNoise",
+            "return_with_leftover_noise": "ReturnNoise"
+        }
+        xy_type = type_mapping[XY_type]
+        xy_value = ["enable", "disable"]
+        return ((xy_type, xy_value),)
+
+#=======================================================================================================================
 # TSC XY Plot: Step Values
 class TSC_XYplot_Steps:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {
-            "select_count": ("INT", {"default": 0, "min": 0, "max": 5}),
-            "steps_1": ("INT", {"default": 20, "min": 1, "max": 10000}),
-            "steps_2": ("INT", {"default": 20, "min": 1, "max": 10000}),
-            "steps_3": ("INT", {"default": 20, "min": 1, "max": 10000}),
-            "steps_4": ("INT", {"default": 20, "min": 1, "max": 10000}),
-            "steps_5": ("INT", {"default": 20, "min": 1, "max": 10000}),},
+        return {
+            "required": {
+                "batch_count": ("INT", {"default": 0, "min": 0, "max": 50}),
+                "first_step": ("INT", {"default": 10, "min": 1, "max": 10000}),
+                "last_step": ("INT", {"default": 20, "min": 1, "max": 10000}),
+            }
         }
 
     RETURN_TYPES = ("XY",)
@@ -1441,27 +1690,95 @@ class TSC_XYplot_Steps:
     FUNCTION = "xy_value"
     CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
 
-    def xy_value(self, select_count, steps_1, steps_2, steps_3, steps_4, steps_5):
+    def xy_value(self, batch_count, first_step, last_step):
         xy_type = "Steps"
-        xy_value = [step for idx, step in enumerate([steps_1, steps_2, steps_3, steps_4, steps_5], start=1) if
-                 idx <= select_count]
+        if batch_count > 1:
+            interval = (last_step - first_step) / (batch_count - 1)
+            xy_value = [int(first_step + i * interval) for i in range(batch_count)]
+        else:
+            xy_value = [first_step] if batch_count == 1 else []
+        xy_value = list(set(xy_value)) # Remove duplicates
+        xy_value.sort()  # Sort in ascending order
+        if not xy_value:
+            return (None,)
+        return ((xy_type, xy_value),)
+
+#=======================================================================================================================
+# TSC XY Plot: Start at Step Values
+class TSC_XYplot_StartStep:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "batch_count": ("INT", {"default": 0, "min": 0, "max": 50}),
+                "first_start_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
+                "last_start_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
+            }
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, batch_count, first_start_step, last_start_step):
+        xy_type = "StartStep"
+        if batch_count > 1:
+            step_increment = (last_start_step - first_start_step) / (batch_count - 1)
+            xy_value = [int(first_start_step + i * step_increment) for i in range(batch_count)]
+        else:
+            xy_value = [first_start_step] if batch_count == 1 else []
+        xy_value = list(set(xy_value))  # Remove duplicates
+        xy_value.sort()  # Sort in ascending order
         if not xy_value:  # Check if the list is empty
             return (None,)
         return ((xy_type, xy_value),)
 
+#=======================================================================================================================
+# TSC XY Plot: End at Step Values
+class TSC_XYplot_EndStep:
 
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "batch_count": ("INT", {"default": 0, "min": 0, "max": 50}),
+                "first_end_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
+                "last_end_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
+            }
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, batch_count, first_end_step, last_end_step):
+        xy_type = "EndStep"
+        if batch_count > 1:
+            step_increment = (last_end_step - first_end_step) / (batch_count - 1)
+            xy_value = [int(first_end_step + i * step_increment) for i in range(batch_count)]
+        else:
+            xy_value = [first_end_step] if batch_count == 1 else []
+        xy_value = list(set(xy_value))  # Remove duplicates
+        xy_value.sort()  # Sort in ascending order
+        if not xy_value:  # Check if the list is empty
+            return (None,)
+        return ((xy_type, xy_value),)
+
+#=======================================================================================================================
 # TSC XY Plot: CFG Values
 class TSC_XYplot_CFG:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {
-            "select_count": ("INT", {"default": 0, "min": 0, "max": 5}),
-            "cfg_1": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
-            "cfg_2": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
-            "cfg_3": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
-            "cfg_4": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
-            "cfg_5": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),},
+        return {
+            "required": {
+                "batch_count": ("INT", {"default": 0, "min": 0, "max": 50}),
+                "first_cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
+                "last_cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
+            }
         }
 
     RETURN_TYPES = ("XY",)
@@ -1469,14 +1786,18 @@ class TSC_XYplot_CFG:
     FUNCTION = "xy_value"
     CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
 
-    def xy_value(self, select_count, cfg_1, cfg_2, cfg_3, cfg_4, cfg_5):
+    def xy_value(self, batch_count, first_cfg, last_cfg):
         xy_type = "CFG Scale"
-        xy_value = [cfg for idx, cfg in enumerate([cfg_1, cfg_2, cfg_3, cfg_4, cfg_5], start=1) if idx <= select_count]
-        if not xy_value:  # Check if the list is empty
+        if batch_count > 1:
+            interval = (last_cfg - first_cfg) / (batch_count - 1)
+            xy_value = [round(first_cfg + i * interval, 2) for i in range(batch_count)]
+        else:
+            xy_value = [first_cfg] if batch_count == 1 else []
+        if not xy_value:
             return (None,)
         return ((xy_type, xy_value),)
 
-
+#=======================================================================================================================
 # TSC XY Plot: Sampler Values
 class TSC_XYplot_Sampler:
     
@@ -1522,7 +1843,7 @@ class TSC_XYplot_Sampler:
             return (None,)
         return ((xy_type, xy_value),)
 
-
+#=======================================================================================================================
 # TSC XY Plot: Scheduler Values
 class TSC_XYplot_Scheduler:
 
@@ -1551,19 +1872,18 @@ class TSC_XYplot_Scheduler:
             return (None,)
         return ((xy_type, xy_value),)
 
-
+#=======================================================================================================================
 # TSC XY Plot: Denoise Values
 class TSC_XYplot_Denoise:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {
-            "select_count": ("INT", {"default": 0, "min": 0, "max": 5}),
-            "denoise_1": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
-            "denoise_2": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
-            "denoise_3": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
-            "denoise_4": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
-            "denoise_5": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),},
+        return {
+            "required": {
+                "batch_count": ("INT", {"default": 0, "min": 0, "max": 50}),
+                "first_denoise": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "last_denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+            }
         }
 
     RETURN_TYPES = ("XY",)
@@ -1571,15 +1891,18 @@ class TSC_XYplot_Denoise:
     FUNCTION = "xy_value"
     CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
 
-    def xy_value(self, select_count, denoise_1, denoise_2, denoise_3, denoise_4, denoise_5):
+    def xy_value(self, batch_count, first_denoise, last_denoise):
         xy_type = "Denoise"
-        xy_value = [denoise for idx, denoise in
-                    enumerate([denoise_1, denoise_2, denoise_3, denoise_4, denoise_5], start=1) if idx <= select_count]
-        if not xy_value:  # Check if the list is empty
+        if batch_count > 1:
+            interval = (last_denoise - first_denoise) / (batch_count - 1)
+            xy_value = [round(first_denoise + i * interval, 2) for i in range(batch_count)]
+        else:
+            xy_value = [first_denoise] if batch_count == 1 else []
+        if not xy_value:
             return (None,)
         return ((xy_type, xy_value),)
 
-
+#=======================================================================================================================
 # TSC XY Plot: VAE Values
 class TSC_XYplot_VAE:
 
@@ -1607,7 +1930,7 @@ class TSC_XYplot_VAE:
             return (None,)
         return ((xy_type, xy_value),)
 
-
+#=======================================================================================================================
 # TSC XY Plot: Prompt S/R Positive
 class TSC_XYplot_PromptSR_Positive:
 
@@ -1646,6 +1969,7 @@ class TSC_XYplot_PromptSR_Positive:
 
         return ((xy_type, xy_values),)
 
+#=======================================================================================================================
 # TSC XY Plot: Prompt S/R Negative
 class TSC_XYplot_PromptSR_Negative:
 
@@ -1684,6 +2008,7 @@ class TSC_XYplot_PromptSR_Negative:
 
         return ((xy_type, xy_values),)
 
+#=======================================================================================================================
 # TSC XY Plot: Checkpoint Values
 class TSC_XYplot_Checkpoint:
 
@@ -1720,18 +2045,18 @@ class TSC_XYplot_Checkpoint:
             return (None,)
         return ((xy_type, xy_value),)
 
+#=======================================================================================================================
 # TSC XY Plot: Clip Skip
 class TSC_XYplot_ClipSkip:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {
-            "select_count": ("INT", {"default": 0, "min": 0, "max": 5}),
-            "clip_skip_1": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
-            "clip_skip_2": ("INT", {"default": -2, "min": -24, "max": -1, "step": 1}),
-            "clip_skip_3": ("INT", {"default": -3, "min": -24, "max": -1, "step": 1}),
-            "clip_skip_4": ("INT", {"default": -4, "min": -24, "max": -1, "step": 1}),
-            "clip_skip_5": ("INT", {"default": -5, "min": -24, "max": -1, "step": 1}),},
+        return {
+            "required": {
+                "batch_count": ("INT", {"default": 0, "min": 0, "max": 50}),
+                "first_clip_skip": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
+                "last_clip_skip": ("INT", {"default": -2, "min": -24, "max": -1, "step": 1}),
+            },
         }
 
     RETURN_TYPES = ("XY",)
@@ -1739,14 +2064,20 @@ class TSC_XYplot_ClipSkip:
     FUNCTION = "xy_value"
     CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
 
-    def xy_value(self, select_count, clip_skip_1, clip_skip_2, clip_skip_3, clip_skip_4, clip_skip_5):
+    def xy_value(self, batch_count, first_clip_skip, last_clip_skip):
         xy_type = "Clip Skip"
-        xy_value = [clip_skip for idx, clip_skip in
-                    enumerate([clip_skip_1, clip_skip_2, clip_skip_3, clip_skip_4, clip_skip_5], start=1) if idx <= select_count]
+        if batch_count > 1:
+            clip_skip_increment = (last_clip_skip - first_clip_skip) / (batch_count - 1)
+            xy_value = [int(first_clip_skip + i * clip_skip_increment) for i in range(batch_count)]
+        else:
+            xy_value = [first_clip_skip] if batch_count == 1 else []
+        xy_value = list(set(xy_value))  # Remove duplicates
+        xy_value.sort()  # Sort in ascending order
         if not xy_value:  # Check if the list is empty
             return (None,)
         return ((xy_type, xy_value),)
 
+#=======================================================================================================================
 # TSC XY Plot: LoRA Values
 class TSC_XYplot_LoRA:
 
@@ -1783,7 +2114,7 @@ class TSC_XYplot_LoRA:
             return (None,)
         return ((xy_type, xy_value),)
 
-
+#=======================================================================================================================
 # TSC XY Plot: LoRA Advanced
 class TSC_XYplot_LoRA_Adv:
 
@@ -1832,7 +2163,7 @@ class TSC_XYplot_LoRA_Adv:
             return (None,)
         return ((xy_type, xy_value),)
 
-
+#=======================================================================================================================
 # TSC XY Plot: LoRA Stacks
 class TSC_XYplot_LoRA_Stacks:
 
@@ -1861,12 +2192,49 @@ class TSC_XYplot_LoRA_Stacks:
         else:
             return ((xy_type, xy_value),)
 
+#=======================================================================================================================
+# TSC XY Plot: Control_Net_Strengths
+class TSC_XYplot_Control_Net_Strengths:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "control_net": ("CONTROL_NET",),
+                "image": ("IMAGE",),
+                "batch_count": ("INT", {"default": 0, "min": 0, "max": 50}),
+                "first_strength": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "last_strength": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+            },
+            "optional": {"cnet_stack": ("CONTROL_NET_STACK",)},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, control_net, image, batch_count, first_strength, last_strength, cnet_stack=None):
+        xy_type = "ControlNetStr"
+        strength_increment = (last_strength - first_strength) / (batch_count - 1) if batch_count > 1 else 0
+        xy_value = [[(control_net, image, first_strength + i * strength_increment)] for i in range(batch_count)]
+
+        # If cnet_stack is provided, extend each inner array with its content
+        if cnet_stack:
+            for inner_list in xy_value:
+                inner_list.extend(cnet_stack)
+
+        return ((xy_type, xy_value),)
+
+#=======================================================================================================================
 # TSC XY Plot: Manual Entry Notes
 class TSC_XYplot_Manual_XY_Entry_Info:
 
     syntax = "(X/Y_types)     (X/Y_values)\n" \
                "Seeds++ Batch   batch_count\n" \
                "Steps           steps_1;steps_2;...\n" \
+               "StartStep       start_step_1;start_step_2;...\n" \
+               "EndStep         end_step_1;end_step_2;...\n" \
                "CFG Scale       cfg_1;cfg_2;...\n" \
                "Sampler(1)      sampler_1;sampler_2;...\n" \
                "Sampler(2)      sampler_1,scheduler_1;...\n" \
@@ -1904,16 +2272,19 @@ class TSC_XYplot_Manual_XY_Entry_Info:
     RETURN_TYPES = ()
     CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
 
+#=======================================================================================================================
 # TSC XY Plot: Manual Entry
 class TSC_XYplot_Manual_XY_Entry:
 
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "X_type": (["Nothing", "Seeds++ Batch", "Steps", "CFG Scale", "Sampler", "Scheduler", "Denoise", "VAE",
+            "X_type": (["Nothing", "Seeds++ Batch", "Steps", "StartStep", "EndStep", "CFG Scale",
+                        "Sampler", "Scheduler", "Denoise", "VAE",
                         "Positive Prompt S/R", "Negative Prompt S/R", "Checkpoint", "Clip Skip", "LoRA"],),
             "X_value": ("STRING", {"default": "", "multiline": True}),
-            "Y_type": (["Nothing", "Seeds++ Batch", "Steps", "CFG Scale", "Sampler", "Scheduler", "Denoise", "VAE",
+            "Y_type": (["Nothing", "Seeds++ Batch", "Steps", "StartStep", "EndStep", "CFG Scale",
+                        "Sampler", "Scheduler", "Denoise", "VAE",
                         "Positive Prompt S/R", "Negative Prompt S/R", "Checkpoint", "Clip Skip", "LoRA"],),
             "Y_value": ("STRING", {"default": "", "multiline": True}),},}
 
@@ -1942,6 +2313,8 @@ class TSC_XYplot_Manual_XY_Entry:
         bounds = {
             "Seeds++ Batch": {"min": 1, "max": 50},
             "Steps": {"min": 1, "max": 10000},
+            "StartStep": {"min": 0, "max": 10000},
+            "EndStep": {"min": 0, "max": 10000},
             "CFG Scale": {"min": 0, "max": 100},
             "Sampler": {"options": comfy.samplers.KSampler.SAMPLERS},
             "Scheduler": {"options": comfy.samplers.KSampler.SCHEDULERS},
@@ -1985,7 +2358,35 @@ class TSC_XYplot_Manual_XY_Entry:
                     print(
                         f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid Step count.")
                     return None
-            # ________________________________________________________________________
+            # __________________________________________________________________________________________________________
+            # Start at Step
+            elif value_type == "StartStep":
+                try:
+                    x = int(value)
+                    if x < bounds["StartStep"]["min"]:
+                        x = bounds["StartStep"]["min"]
+                    elif x > bounds["StartStep"]["max"]:
+                        x = bounds["StartStep"]["max"]
+                    return x
+                except ValueError:
+                    print(
+                        f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid Start Step.")
+                    return None
+            # __________________________________________________________________________________________________________
+            # End at Step
+            elif value_type == "EndStep":
+                try:
+                    x = int(value)
+                    if x < bounds["EndStep"]["min"]:
+                        x = bounds["EndStep"]["min"]
+                    elif x > bounds["EndStep"]["max"]:
+                        x = bounds["EndStep"]["max"]
+                    return x
+                except ValueError:
+                    print(
+                        f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid End Step.")
+                    return None
+            # __________________________________________________________________________________________________________
             # CFG Scale
             elif value_type == "CFG Scale":
                 try:
@@ -2000,7 +2401,7 @@ class TSC_XYplot_Manual_XY_Entry:
                         f"\033[31mXY Plot Error:\033[0m '{value}' is not a number between {bounds['CFG Scale']['min']}"
                         f" and {bounds['CFG Scale']['max']} for CFG Scale.")
                     return None
-            # ________________________________________________________________________
+            # __________________________________________________________________________________________________________
             # Sampler
             elif value_type == "Sampler":
                 if isinstance(value, str) and ',' in value:
@@ -2036,7 +2437,7 @@ class TSC_XYplot_Manual_XY_Entry:
                         return None
                     else:
                         return value, None
-            # ________________________________________________________________________
+            # __________________________________________________________________________________________________________
             # Scheduler
             elif value_type == "Scheduler":
                 if value not in bounds["Scheduler"]["options"]:
@@ -2046,7 +2447,7 @@ class TSC_XYplot_Manual_XY_Entry:
                     return None
                 else:
                     return value
-            # ________________________________________________________________________
+            # __________________________________________________________________________________________________________
             # Denoise
             elif value_type == "Denoise":
                 try:
@@ -2061,7 +2462,7 @@ class TSC_XYplot_Manual_XY_Entry:
                         f"\033[31mXY Plot Error:\033[0m '{value}' is not a number between {bounds['Denoise']['min']} "
                         f"and {bounds['Denoise']['max']} for Denoise.")
                     return None
-            # ________________________________________________________________________
+            # __________________________________________________________________________________________________________
             # VAE
             elif value_type == "VAE":
                 if value not in bounds["VAE"]["options"]:
@@ -2070,7 +2471,7 @@ class TSC_XYplot_Manual_XY_Entry:
                     return None
                 else:
                     return value
-            # ________________________________________________________________________
+            # __________________________________________________________________________________________________________
             # Checkpoint
             elif value_type == "Checkpoint":
                 if isinstance(value, str) and ',' in value:
@@ -2110,7 +2511,7 @@ class TSC_XYplot_Manual_XY_Entry:
                         return None
                     else:
                         return value, None
-            # ________________________________________________________________________
+            # __________________________________________________________________________________________________________
             # Clip Skip
             elif value_type == "Clip Skip":
                 try:
@@ -2123,7 +2524,7 @@ class TSC_XYplot_Manual_XY_Entry:
                 except ValueError:
                     print(f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid Clip Skip.")
                     return None
-            # ________________________________________________________________________
+            # __________________________________________________________________________________________________________
             # LoRA
             elif value_type == "LoRA":
                 if isinstance(value, str) and ',' in value:
@@ -2168,7 +2569,7 @@ class TSC_XYplot_Manual_XY_Entry:
                     else:
                         return value, 1.0, 1.0
 
-            # ________________________________________________________________________
+            # __________________________________________________________________________________________________________
             else:
                 return None
 
@@ -2252,6 +2653,7 @@ class TSC_XYplot_Manual_XY_Entry:
 
         return ((X_type, X_value), (Y_type, Y_value),)
 
+#=======================================================================================================================
 # TSC XY Plot: Seeds Values
 class TSC_XYplot_JoinInputs:
 
@@ -2386,18 +2788,6 @@ class TSC_ImageOverlay:
         return (base_image,)
 
 ########################################################################################################################
-# Install simple_eval if missing from packages
-def install_simpleeval():
-    if 'simpleeval' not in packages():
-        print("\033[32mEfficiency Nodes:\033[0m")
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'simpleeval'])
-
-def packages(versions=False):
-    return [(r.decode().split('==')[0] if not versions else r.decode()) for r in subprocess.check_output([sys.executable, '-m', 'pip', 'freeze']).split()]
-
-install_simpleeval()
-import simpleeval
-
 # TSC Evaluate Integers (https://github.com/danthedeckie/simpleeval)
 class TSC_EvaluateInts:
     @classmethod
@@ -2428,6 +2818,7 @@ class TSC_EvaluateInts:
                 float_result) + ", STRING: " + string_result + "\033[0m")
         return (int_result, float_result, string_result,)
 
+#=======================================================================================================================
 # TSC Evaluate Floats (https://github.com/danthedeckie/simpleeval)
 class TSC_EvaluateFloats:
     @classmethod
@@ -2458,6 +2849,7 @@ class TSC_EvaluateFloats:
                 float_result) + ", STRING: " + string_result + "\033[0m")
         return (int_result, float_result, string_result,)
 
+#=======================================================================================================================
 # TSC Evaluate Strings (https://github.com/danthedeckie/simpleeval)
 class TSC_EvaluateStrs:
     @classmethod
@@ -2488,6 +2880,7 @@ class TSC_EvaluateStrs:
             print(f"{python_expression} = \033[92m" + str(result) + "\033[0m")
         return (str(result),)  # Convert result to a string before returning
 
+#=======================================================================================================================
 # TSC Simple Eval Examples (https://github.com/danthedeckie/simpleeval)
 class TSC_EvalExamples:
     filepath = os.path.join(my_dir, 'workflows', 'SimpleEval_Node_Examples.txt')
@@ -2499,6 +2892,7 @@ class TSC_EvalExamples:
     RETURN_TYPES = ()
     CATEGORY = "Efficiency Nodes/Simple Eval"
 
+########################################################################################################################
 # NODE MAPPING
 NODE_CLASS_MAPPINGS = {
     "KSampler (Efficient)": TSC_KSampler,
@@ -2506,9 +2900,13 @@ NODE_CLASS_MAPPINGS = {
     "Efficient Loader": TSC_EfficientLoader,
     "LoRA Stacker": TSC_LoRA_Stacker,
     "LoRA Stacker Adv.": TSC_LoRA_Stacker_Adv,
+    "Control Net Stacker": TSC_Control_Net_Stacker,
     "XY Plot": TSC_XYplot,
     "XY Input: Seeds++ Batch": TSC_XYplot_SeedsBatch,
+    "XY Input: Add/Return Noise": TSC_XYplot_AddReturnNoise,
     "XY Input: Steps": TSC_XYplot_Steps,
+    "XY Input: Start at Step": TSC_XYplot_StartStep,
+    "XY Input: End at Step": TSC_XYplot_EndStep,
     "XY Input: CFG Scale": TSC_XYplot_CFG,
     "XY Input: Sampler": TSC_XYplot_Sampler,
     "XY Input: Scheduler": TSC_XYplot_Scheduler,
@@ -2521,6 +2919,7 @@ NODE_CLASS_MAPPINGS = {
     "XY Input: LoRA": TSC_XYplot_LoRA,
     "XY Input: LoRA Adv.": TSC_XYplot_LoRA_Adv,
     "XY Input: LoRA Stacks": TSC_XYplot_LoRA_Stacks,
+    "XY Input: Control Net Strengths": TSC_XYplot_Control_Net_Strengths,
     "XY Input: Manual XY Entry": TSC_XYplot_Manual_XY_Entry,
     "Manual XY Entry Info": TSC_XYplot_Manual_XY_Entry_Info,
     "Join XY Inputs of Same Type": TSC_XYplot_JoinInputs,

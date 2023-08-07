@@ -41,3 +41,6 @@ Notes:
   For example, if the scheduler isn't specified when plotting Samplers, the script will use
   the scheduler set by the Ksampler (Efficient).
 - LoRA stacking through the XY Plot Manual Entry node is currently not supported.
+- The following XY Plot types are not allowed types in an XY Plot for each of the following KSampler nodes...
+     1) KSampler (Efficient): "AddNoise", "ReturnNoise", "StartStep", "EndStep"
+     2) KSampler Adv. (Efficient): "Denoise"
