@@ -43,7 +43,7 @@ import comfy.latent_formats
 from tsc_utils import *
 
 # Import dependencies
-from simpleeval import simple_eval
+import simpleeval
 
 MAX_RESOLUTION=8192
 
