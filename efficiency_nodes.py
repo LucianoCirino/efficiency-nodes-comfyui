@@ -554,11 +554,11 @@ class TSC_KSampler:
 
                 # Optimize image generation by prioritizing Checkpoint>LoRA>VAE>PromptSR as X in For Loop. Flip back when done.
                 if Y_type == "Checkpoint" or \
-                        Y_type == "LoRA" and X_type not in {"Checkpoint"} or \
-                        Y_type == "VAE" and X_type not in {"Checkpoint", "LoRA"} or \
-                        Y_type == "Positive Prompt S/R" and X_type not in {"Checkpoint", "LoRA", "VAE",
+                        (Y_type == "LoRA" or Y_type == "LoRA-Cwt" or Y_type == "LoRA-Mwt") and X_type not in {"Checkpoint"} or \
+                        Y_type == "VAE" and X_type not in {"Checkpoint", "LoRA", "LoRA-Cwt", "LoRA-Mwt"} or \
+                        Y_type == "Positive Prompt S/R" and X_type not in {"Checkpoint", "LoRA", "LoRA-Cwt", "LoRA-Mwt", "VAE",
                                                                            "Negative Prompt S/R"} or \
-                        Y_type == "Negative Prompt S/R" and X_type not in {"Checkpoint", "LoRA", "VAE",
+                        Y_type == "Negative Prompt S/R" and X_type not in {"Checkpoint", "LoRA", "LoRA-Cwt", "LoRA-Mwt", "VAE",
                                                                            "Positive Prompt S/R"} or \
                         X_type == "Nothing" and Y_type != "Nothing":
                     flip_xy = True
@@ -576,22 +576,20 @@ class TSC_KSampler:
                 type_value_pairs = [(X_type, X_value), (Y_type, Y_value)]
 
                 # Iterate over type-value pairs
-                initalT = None
+                initialT = None
                 for t, v in type_value_pairs:
                     if t in dict_map:
                         # Flatten the list of lists of tuples if the type is "LoRA"
-                        if t == "LoRA":
-                            if(initalT == None):
-                                initalT = copy.deepcopy(t)
+                        if t == "LoRA" or t == "LoRA-Mwt" or t == "LoRA-Cwt":
                             #dict_map[t] = [item for sublist in v for item in sublist]
-                            dict_map[initalT].extend([item for sublist in v for item in sublist])
+                            dict_map["LoRA"].extend([item for sublist in v for item in sublist])
                         else:
                             dict_map[t] = v
 
                 ckpt_dict = [t[0] for t in dict_map.get("Checkpoint", [])] if dict_map.get("Checkpoint", []) else []
 
                 lora_dict = [[t,] for t in dict_map.get("LoRA", [])] if dict_map.get("LoRA", []) else []
-
+                
                 # If both ckpt_dict and lora_dict are not empty, manipulate lora_dict as described
                 if ckpt_dict and lora_dict:
                     lora_dict = [(lora_params, ckpt) for ckpt in ckpt_dict for lora_params in lora_dict]
@@ -602,7 +600,7 @@ class TSC_KSampler:
                 vae_dict = dict_map.get("VAE", [])
 
                 # prioritize Caching Checkpoints over LoRAs but not both.
-                if X_type == "LoRA":
+                if X_type == "LoRA" or X_type == "LoRA-Mwt" or X_type == "LoRA-Cwt":
                     ckpt_dict = []
                 if X_type == "Checkpoint":
                     lora_dict = []
@@ -616,6 +614,8 @@ class TSC_KSampler:
                 # Print loaded_objects for debugging
                 ###print_loaded_objects_entries()
 
+                
+
                 #_______________________________________________________________________________________________________
                 # Function that changes appropiate variables for next processed generations (also generates XY_labels)
                 def define_variable(var_type, var, seed, steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
@@ -623,7 +623,7 @@ class TSC_KSampler:
 
                     # Define default max label size limit
                     max_label_len = 36
-
+                    text = ""
                     # If var_type is "Seeds++ Batch", update var and seed, and generate labels
                     if var_type == "Seeds++ Batch":
                         text = f"Seed: {seed}"
@@ -707,7 +707,7 @@ class TSC_KSampler:
                         text = f"Clip Skip ({clip_skip[0]})"
 
                     elif var_type == "LoRA" or var_type == "LoRA-Y":
-                        lora_params = var                        
+                        lora_params = var
                         max_label_len = 30 + (12 * (len(lora_params)-1))
                         if len(lora_params) == 1:
                             lora_name, lora_model_wt, lora_clip_wt = lora_params[0]
@@ -729,10 +729,32 @@ class TSC_KSampler:
                             lora_filenames = [filename[:max_name_length] for filename in lora_filenames]
                             text_elements = [f"{lora_filename}({lora_details[i][0]})" if lora_details[i][0] == lora_details[i][1] else f"{lora_filename}({lora_details[i][0]},{lora_details[i][1]})" for i, lora_filename in enumerate(lora_filenames)]
                             
-                            if(var_type == "LoRA-Y"): #first lora name is in the other axis
+                            if var_type == "LoRA-Y":
                                 text_elements.pop(0)
+                                text_elements.insert(0, "LoRA: ")
 
                             text = " ".join(text_elements)
+
+
+                    elif var_type == "LoRA-Mwt" or var_type == "LoRA-Cwt":
+                        lora_params = var
+                        max_label_len = 30 + (12 * (len(lora_params)-1))
+                        for val in lora_params:
+                            if val not in ConstantLoras:
+                                lora_name = val[0]
+                                lora_model_wt = val[1]
+                                lora_clip_wt = val[2]
+                                lora_filename = os.path.splitext(os.path.basename(lora_name))[0]
+                                lora_model_wt = format(float(lora_model_wt), ".2f").rstrip('0').rstrip('.')
+                                lora_clip_wt = format(float(lora_clip_wt), ".2f").rstrip('0').rstrip('.')
+                                lora_filename = lora_filename[:max_label_len - len(f"LoRA: Model WT: ({lora_model_wt})")]
+                                
+                                if var_type == "LoRA-Mwt":
+                                    text = f"LoRA: {lora_filename} Model WT: {lora_model_wt}"
+                                
+                                if var_type == "LoRA-Cwt":
+                                    text = f"LoRA: {lora_filename} Clip WT: {lora_clip_wt}"
+
                     else:
                         text=""
 
@@ -747,7 +769,7 @@ class TSC_KSampler:
                         var_label.append(text)
 
                     # If var_type VAE , truncate entries in the var_label list when it's full
-                    if len(var_label) == num_label and (var_type == "VAE" or var_type == "Checkpoint" or var_type == "LoRA"):
+                    if len(var_label) == num_label and (var_type == "VAE" or var_type == "Checkpoint" or var_type == "LoRA" or var_type == "LoRA-Mwt" or var_type == "LoRA-Cwt"):
                         var_label = truncate_texts(var_label, num_label, max_label_len)
 
                     # Return the modified variables
@@ -779,7 +801,7 @@ class TSC_KSampler:
                         vae = load_vae(vae_name, script_node_id, cache=cache[0])
 
                     # Load Checkpoint if required. If Y_type is LoRA, required models will be loaded by load_lora func.
-                    if (X_type == "Checkpoint" and index == 0 and Y_type != "LoRA"):
+                    if (X_type == "Checkpoint" and index == 0 and (Y_type != "LoRA" and Y_type != "LoRA-Mwt" and Y_type != "LoRA-Cwt")):
                         if lora_params is None:
                             model, clip, _ = load_checkpoint(ckpt_name, script_node_id, output_vae=False, cache=cache[1])
                         else: # Load Efficient Loader LoRA
@@ -787,19 +809,21 @@ class TSC_KSampler:
                                                     cache=None, ckpt_cache=cache[1])
                         encode = True
 
-                    # Load LoRA if required or always if both X & Y are LoRAs
-                    elif (X_type == "LoRA" and Y_type == "LoRA"):
-                    #elif ((X_type == "LoRA" and index == 0)):
-                        # Don't cache Checkpoints
+                    elif X_type == "LoRA-Mwt" or X_type == "LoRA-Cwt" or Y_type == "LoRA-Mwt" or Y_type == "LoRA-Cwt":
                         model, clip = load_lora(lora_params, ckpt_name, script_node_id, cache=cache[2])
                         encode = True
 
-                    elif ((X_type == "LoRA" or Y_type == "LoRA") and (not X_type == "LoRA" and not Y_type == "LoRA") and index == 0):
+                    elif X_type == "LoRA" and Y_type == "LoRA":
+                        model, clip = load_lora(lora_params, ckpt_name, script_node_id, cache=cache[2])
+                        encode = True
+                        
+                    # Load LoRA if required
+                    elif ((X_type == "LoRA" or X_type == "LoRA-Mwt" or X_type == "LoRA-Cwt") and index == 0):
                         # Don't cache Checkpoints
                         model, clip = load_lora(lora_params, ckpt_name, script_node_id, cache=cache[2])
                         encode = True
                         
-                    elif (Y_type == "LoRA" and X_type == "Checkpoint"):  # X_type must be Checkpoint, so cache those as defined
+                    elif (Y_type == "LoRA" or Y_type == "LoRA-Mwt" or Y_type == "LoRA-Cwt") and X_type == "Checkpoint":  # X_type must be Checkpoint, so cache those as defined
                         model, clip = load_lora(lora_params, ckpt_name, script_node_id,
                                                 cache=None, ckpt_cache=cache[1])
                         encode = True
@@ -869,134 +893,30 @@ class TSC_KSampler:
                 # Store types in a Tuple for easy function passing
                 types = (X_type, Y_type)
 
-                #checks if the Xvalues and Yvalues are the same as well as both being LoRAs, which triggers the model generation to consolidate the LoRA names but changes the clip/model weights
-                #also saves the 'reference' values for the axis constants.
-                X_lora = None
-                Y_lora = None
-                #one of the weights for each axis should be false, if it's a number then it's the control for the whole axis
-                X_modelWt = None
-                Y_modelWt = None
-                X_clipWt = None
-                Y_clipWt = None
-                newYlabel = []
-                newXlabel = []
-                discardedLoras = []
-                UnchangingLoras = []
-                uniqueInputCounter = len(X_value) + len(Y_value)
-                LoraEqualityTest = False
+                #log constant LoRAs (by name) if used with LoRA-Mwt/Cwt axis, to ignore for initial labeling
+                ConstantLoras = []
+                if (X_type == "LoRA-Mwt" and Y_type == "LoRA-Cwt") or (X_type == "LoRA-Cwt" and Y_type == "LoRA-Mwt"):
+                    LoraList = {}
+                    LoraNameList = []
+                    for val in X_value:
+                        for sub in val:
+                            temp = (sub[0], sub[1], sub[2])
+                            LoraList[sub[0]] = temp
+                            LoraNameList.append(sub[0])
+                    for val in Y_value:
+                        for sub in val:
+                            temp = (sub[0], sub[1], sub[2])
+                            LoraList[sub[0]] = temp
+                            LoraNameList.append(sub[0])
+                    for name in LoraNameList:
+                        ##print("LoraList: ", val)
+                        #if ((LoraList.count(val) == (len(X_value))) or (LoraList.count(val) == (len(Y_value)))) and val not in ConstantLoras: #see note in node definition
+                        tempVal = LoraList[name]
+                        if (LoraNameList.count(name) == len(Y_value)  or LoraNameList.count(name) == len(X_value)) and tempVal not in ConstantLoras:
+                            #if the lora name appears the same amount of times as the axis with lora stackers
+                            ConstantLoras.append(tempVal)
+                            print("Constant Loras adding: ", tempVal)
 
-                if(X_type == "LoRA" and Y_type == "LoRA"):
-                    LoraEqualityTest = True
-                    #preprocessing to remove loras that don't change
-                    temp = []
-                    for X in X_value:
-                        for SubX in X:
-                            templist = (SubX[0], SubX[1], SubX[2])
-                            temp.append(templist)
-
-                    for Y in Y_value:
-                        for SubY in Y:
-                            templist = (SubY[0], SubY[1], SubY[2])
-                            temp.append(templist)
-                    
-                    for lora in temp:
-                        #print(lora, " count: ", str(temp.count(lora)))
-                        if temp.count(lora) == uniqueInputCounter:
-                            discardedLoras.append(lora)
-
-                            ##removes loras that don't change from X & Y value lists
-                            tempValue = copy.deepcopy(X_value)
-                            replacmentValue = []
-                            for Xlist in tempValue:
-                                newList = copy.deepcopy(Xlist)
-                                for X in Xlist:
-                                    if lora == X:
-                                        newList.remove(X)
-                                replacmentValue.append(newList)
-                            X_value = copy.deepcopy(replacmentValue)
-
-                            tempValue = copy.deepcopy(Y_value)
-                            replacmentValue = []
-                            for Xlist in tempValue:
-                                newList = copy.deepcopy(Xlist)
-                                for X in Xlist:
-                                    if lora == X:
-                                        newList.remove(X)
-                                replacmentValue.append(newList)                            
-                            Y_value = copy.deepcopy(replacmentValue)
-
-                    for Xint, X in enumerate(X_value):
-                        for SubXint, SubX in enumerate(X):
-                            #print("X", SubX[0])
-                            #checking X axis names
-                            if X_lora == None:
-                                X_lora = SubX[0]
-                            elif X_lora != SubX[0]:
-                                #LoraEqualityTest = False
-                                templist = (SubX[0], SubX[1], SubX[2])
-                                discardedLoras.append(templist)
-                                
-
-                            #checking if weights changed at some point, if so then marking as false to prevent X/Y consolidated LoRA generation with that as a constant
-                            if X_modelWt == None:
-                                X_modelWt = SubX[1]
-                            elif X_modelWt != SubX[1] and X_modelWt != False:
-                                X_modelWt = False
-
-                            if X_clipWt == None:
-                                X_clipWt = SubX[1]
-                            elif X_clipWt != SubX[2] and X_clipWt != False:
-                                X_clipWt = False
-                            #print("Lora: ", str(SubX[0]), "M: ", str(SubX[1]), "C: ", str(SubX[2]), " set evaluation to: ", str(LoraEqualityTest))
-                        if not X_modelWt and not X_clipWt:
-                            #can't change both model and clip weight on same axis
-                            LoraEqualityTest = False
-
-                        
-
-                    for Yint, Y in enumerate(Y_value):
-                        for SubYint, SubY in enumerate(Y):
-                            #print("Y", SubY[0])
-                            #checking Y axis names
-                            if Y_lora == None:
-                                Y_lora = SubY[0]
-                            elif Y_lora != SubY[0]:
-                                #LoraEqualityTest = False
-                                templist = (SubY[0], SubY[1], SubY[2])
-                                discardedLoras.append(templist)
-
-                            #checking if weights changed at some point, if so then marking as false to prevent X/Y consolidated LoRA generation with that as a constant
-                            if Y_modelWt == None:
-                                Y_modelWt = SubY[1]
-                            elif Y_modelWt != SubY[1] and Y_modelWt != False:
-                                Y_modelWt = False
-
-                            if Y_clipWt == None:
-                                Y_clipWt = SubY[1]
-                            elif Y_clipWt != SubY[2] and Y_clipWt != False:
-                                Y_clipWt = False
-                            #print("Lora: ", str(SubX[0]), "M: ", str(SubX[1]), "C: ", str(SubX[2]), " set evaluation to: ", str(LoraEqualityTest))
-                        if not Y_modelWt and not Y_clipWt:
-                            #can't change both model and clip weight on same axis
-                            LoraEqualityTest = False
-
-                        
-
-                    if X_lora != Y_lora:
-                        LoraEqualityTest = False
-                        #print("X Lora: ", str(X_lora), " Y Lora: ", str(Y_lora))
-
-                    for trashedLora in discardedLoras:
-                        #print("Discarded LoRAs: ", trashedLora)
-                        #print("Count: " + str(discardedLoras.count(trashedLora)), " UniqueImg: ", str(uniqueInputCounter))
-                        if discardedLoras.count(trashedLora) == uniqueInputCounter:
-                            if trashedLora not in UnchangingLoras:
-                                UnchangingLoras.append(trashedLora)
-                                #print("Adding to global loras")
-                        else:
-                            LoraEqualityTest = False
-                            
-                        
                 # Fill Plot Rows (X)
                 for X_index, X in enumerate(X_value):
 
@@ -1025,7 +945,6 @@ class TSC_KSampler:
 
                     elif X_type != "Nothing" and Y_type != "Nothing":
                         # Seed control based on loop index during Batch
-                        newXlabelAdded = False
                         for Y_index, Y in enumerate(Y_value):
 
                             if Y_type == "Seeds++ Batch":
@@ -1033,47 +952,19 @@ class TSC_KSampler:
                                 seed_updated = seed + Y_index
 
                             # Define Y parameters and generate labels
-                            if X_type == "LoRA" and Y_type == "LoRA":
-                                print("Lora equality test: ", str(LoraEqualityTest))
-                                if LoraEqualityTest:
-                                    #both axis are using the same LoRA set, so it shouldn't duplicate the LoRAs. instead only change the weights.
-                                    #weights being false mean they are the same in each entry of the axis values, so using the first one is fine
-                                    #also creates new labels for easier understanding, (one X label per X loop though)
+                            if(X_type == "LoRA-Mwt" and Y_type == "LoRA-Cwt") or (X_type == "LoRA-Cwt" and Y_type == "LoRA-Mwt") or (X_type == "LoRA" and Y_type == "LoRA"):
 
-                                    if X_modelWt != False:
-                                        LoraModelWeight = Y[0][1]
-                                        newYlabel.append("Model WT: " + str(Y[0][1]))
-                                    else:
-                                        LoraModelWeight = X[0][1]
-                                        if not newXlabelAdded:
-                                            newXlabel.append("Model Wt: " + str(X[0][1]))
-                                            newXlabelAdded = True
-                                    
-                                    if X_clipWt != False:
-                                        LoraClipWeight = Y[0][2]
-                                        newYlabel.append("Clip WT: " + str(Y[0][2]))
-                                    else:
-                                        LoraClipWeight = X[0][2]
-                                        if not newXlabelAdded:
-                                            newXlabel.append("Clip WT: " + str(X[0][2]))
-                                            newXlabelAdded = True
-
-                                    XYfakeTuple = [(X_lora, LoraModelWeight, LoraClipWeight)]
-                                    
-                                    for lora in UnchangingLoras:
-                                        XYfakeTuple.append(lora)
-
-                                    steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, positive_prompt, negative_prompt, lora_params, Y_label = \
-                                        define_variable(Y_type, XYfakeTuple, seed_updated, steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                                        clip_skip, positive_prompt, negative_prompt, lora_params, Y_label, len(Y_value))
-                                else:
-                                    #Lora-Y skips over the first LoRA label when generated since it's labeled on the other axis
+                                if X_type == "LoRA" and Y_type == "LoRA":
                                     Y_type = "LoRA-Y"
-                                    steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, positive_prompt, negative_prompt, lora_params, Y_label = \
-                                        define_variable(Y_type, X+Y, seed_updated, steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                                        clip_skip, positive_prompt, negative_prompt, lora_params, Y_label, len(Y_value))
+
+                                steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, positive_prompt, negative_prompt, lora_params, Y_label = \
+                                    define_variable(Y_type, X+Y, seed_updated, steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
+                                                    clip_skip, positive_prompt, negative_prompt, lora_params, Y_label, len(Y_value))
+                                
+                                if X_type == "LoRA" and Y_type == "LoRA-Y":
                                     Y_type = "LoRA"
-                            else:
+
+                            else:                              
                                 steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, positive_prompt, negative_prompt, lora_params, Y_label = \
                                     define_variable(Y_type, Y, seed_updated, steps, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
                                                     clip_skip, positive_prompt, negative_prompt, lora_params, Y_label, len(Y_value))
@@ -1088,19 +979,13 @@ class TSC_KSampler:
                                 process_values(model, seed_updated, steps, cfg, sampler_name, scheduler[0],
                                                positive, negative, latent_image, denoise, vae)
 
-                #fix labels for LoRA/LoRA generation
-                if LoraEqualityTest:
-                    #pass
-                    X_label = copy.deepcopy(newXlabel)
-                    Y_label = copy.deepcopy(newYlabel)
-
                 # Clean up cache
                 if cache_models == "False":
                     clear_cache_by_exception(script_node_id, vae_dict=[], ckpt_dict=[], lora_dict=[])
                 #
                 else:
                     # Prioritrize Caching Checkpoints over LoRAs.
-                    if X_type == "LoRA":
+                    if X_type == "LoRA" or X_type == "Lora-Mwt" or X_type == "Lora-Cwt":
                         clear_cache_by_exception(script_node_id, ckpt_dict=[])
                     elif X_type == "Checkpoint":
                         clear_cache_by_exception(script_node_id, lora_dict=[])
@@ -1145,14 +1030,14 @@ class TSC_KSampler:
                         return ckpt_name, clip_skip
 
                     def get_lora_name(X_type, Y_type, X_value, Y_value, lora_params=None):
-                        if X_type != "LoRA" and Y_type != "LoRA":
+                        if (X_type != "LoRA" and X_type != "LoRA-Mwt" and X_type != "LoRA-Cwt") and (Y_type != "LoRA" and Y_type != "LoRA-Mwt" and Y_type != "Lora-Cwt"):
                             if lora_params:
                                 return f"[{', '.join([f'{os.path.splitext(os.path.basename(name))[0]}({round(model_wt, 3)},{round(clip_wt, 3)})' for name, model_wt, clip_wt in lora_params])}]"
                             else:
                                 return None
                         else:
                             return get_lora_sublist_name(X_type,
-                                                         X_value) if X_type == "LoRA" else get_lora_sublist_name(Y_type, Y_value) if Y_type == "LoRA" else None
+                                                         X_value) if (X_type == "LoRA" or X_type == "LoRA-Mwt" or X_type == "LoRA-Cwt") else get_lora_sublist_name(Y_type, Y_value) if (Y_type == "LoRA" or Y_type == "LoRA-Mwt" or Y_type == "LoRA-Cwt") else None
 
                     def get_lora_sublist_name(lora_type, lora_value):
                         return ", ".join([
@@ -1438,32 +1323,30 @@ class TSC_KSampler:
                     # Update the y_offset
                     y_offset += img.height + grid_spacing
 
+                    if X_type == "LoRA-Mwt" or X_type == "LoRA-Cwt":
+                        cornerlabel = "Dynamic: " + X_value[0][0][0]
+                        initial_font_size = int(48 * border_size_left / 512)   
 
-                #add single LoRA/LoRA name in top left corner
-                if LoraEqualityTest:
-                    cornerlabel = "Dynamic: " + X_lora
-                    initial_font_size = int(48 * border_size_left / 512)   
+                        initFontSize = adjusted_font_size(cornerlabel, initial_font_size, border_size_left)
+                        for lora in ConstantLoras:
+                            appendString = "\nStatic: " + str(lora[0]) + " M:" + str(lora[1]) + " C: " + str(lora[2])
+                            cornerlabel += appendString
+                            font_size = adjusted_font_size(appendString, initial_font_size, border_size_left)
+                            if font_size < initFontSize:
+                                initFontSize = copy.deepcopy(font_size)
 
-                    initFontSize = adjusted_font_size(cornerlabel, initial_font_size, border_size_left)
-                    for lora in UnchangingLoras:
-                        appendString = "\nStatic: " + str(lora[0]) + " M:" + str(lora[1]) + " C: " + str(lora[2])
-                        cornerlabel += appendString
-                        font_size = adjusted_font_size(appendString, initial_font_size, border_size_left)
-                        if font_size < initFontSize:
-                            initFontSize = copy.deepcopy(font_size)
+                        cornerlabel += "\nSeed: " + str(seed) + " W:" + str(latent_width) + " H: " + str(latent_height) + "\nCheckpoint: " + ckpt_name
+                        label_cornerLabel = Image.new('RGBA', (border_size_left, int(initFontSize * 1.5 * (len(ConstantLoras)+3))), color=(255, 255, 255, 0))
 
-                    cornerlabel += "\nSeed: " + str(seed) + " W:" + str(latent_width) + " H: " + str(latent_height) + "\nCheckpoint: " + ckpt_name
-                    label_cornerLabel = Image.new('RGBA', (border_size_left, int(initFontSize * 1.5 * (len(UnchangingLoras)+3))), color=(255, 255, 255, 0))
-                    
-                    d = ImageDraw.Draw(label_cornerLabel)
+                        d = ImageDraw.Draw(label_cornerLabel)
 
-                    # Create the font object
-                    font = ImageFont.truetype(str(Path(font_path)), initFontSize)
-                    _, _, text_width, text_height = d.textbbox([0,0], text, font=font)
-                    
-                    d.text((0, 0), cornerlabel, fill='black', font=font)
+                        # Create the font object
+                        font = ImageFont.truetype(str(Path(font_path)), initFontSize)
+                        _, _, text_width, text_height = d.textbbox([0,0], text, font=font)
 
-                    background.alpha_composite(label_cornerLabel, (0, 0))
+                        d.text((0, 0), cornerlabel, fill='black', font=font)
+
+                        background.alpha_composite(label_cornerLabel, (0, 0))
 
                 images = pil2tensor(background)
 
@@ -1577,7 +1460,7 @@ class TSC_XYplot:
             return (None,)
 
         # Check that dependencies is connected for Checkpoint and LoRA plots
-        types = ("Checkpoint", "LoRA", "Positive Prompt S/R", "Negative Prompt S/R")
+        types = ("Checkpoint", "LoRA", "Positive Prompt S/R", "Negative Prompt S/R", "LoRA-Mwt", "LoRA-Cwt")
         if X_type in types or Y_type in types:
             if dependencies == None: # Not connected
                 print(f"\033[31mXY Plot Error:\033[0m The dependencies input must be connected for certain plot types.")
@@ -2049,6 +1932,71 @@ class TSC_XYplot_LoRA_Adv:
         if not xy_value:  # Check if the list is empty
             return (None,)
         return ((xy_type, xy_value),)
+
+class TSC_XYplot_LoRA_Weights:
+
+    loras = ["None"] + folder_paths.get_filename_list("loras")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+                            "dynamic_lora_name": (cls.loras,),
+                            "model_str_count": ("INT", {"default": 2, "min": 2, "max": 100, "step": 1}),
+                            "model_str_start": ("FLOAT", {"default": 0.0, "min": -10.0, "max": 10.0, "step": 0.1}),
+                            "model_str_end": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.1}),
+                            "clip_str_count": ("INT", {"default": 2, "min": 2, "max": 100, "step": 1}),
+                            "clip_str_start": ("FLOAT", {"default": 0.0, "min": -10.0, "max": 10.0, "step": 0.1}),
+                            "clip_str_end": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.1}),},
+                "optional": {"lora_stack": ("LORA_STACK",)}
+        }
+
+    RETURN_TYPES = ("XY", "XY")
+    RETURN_NAMES = ("X", "Y")
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+
+    def xy_value(self, dynamic_lora_name, model_str_count, model_str_start, model_str_end, clip_str_count, clip_str_start, clip_str_end,
+                 lora_stack=None):
+        ##xy_type = "LoRA"
+        x_type = "LoRA-Mwt"
+        y_type = "LoRA-Cwt"
+        
+        loras = []
+        model_strs = []
+        clip_strs = []
+
+        #X axis is for model weights
+        modelIncrement = (model_str_end - model_str_start)/(model_str_count-1)
+        for inc in range(model_str_count):
+            loras.append(dynamic_lora_name)
+            model_strs.append(modelIncrement * inc)
+            clip_strs.append(0)
+            #print("\nAdding Xaxis values: ", dynamic_lora_name, str(modelIncrement * inc), 0)
+
+        # only store additional LoRA stack items in the X-axis
+        ### !!!very important!!! the labeler script checks for constant LoRAs agaisnt the number of X inputs
+        x_value = [[(lora, model_str, clip_str)] + (lora_stack if lora_stack else []) for lora, model_str, clip_str in
+                    zip(loras, model_strs, clip_strs) if lora != "None"]
+        
+        loras = []
+        model_strs = []
+        clip_strs = []      
+        #Y axis if for clip weights
+        clipIncrement = (clip_str_end - clip_str_start)/(clip_str_count-1)
+        for inc in range(clip_str_count):
+            loras.append(dynamic_lora_name)
+            model_strs.append(0)
+            clip_strs.append(clipIncrement * inc)
+            #print("\nAdding Yaxis values: ", dynamic_lora_name, str(clipIncrement * inc), 0)
+        
+        y_value = [[(lora, model_str, clip_str)] for lora, model_str, clip_str in
+                    zip(loras, model_strs, clip_strs) if lora != "None"]
+
+        if not x_value or not y_value:  # Check if the list is empty
+            return (None,)
+        #print("\nX values: ", x_value)
+        #print("\nY values: ", y_value)
+        return ((x_type, x_value), (y_type, y_value))
 
 
 # TSC XY Plot: LoRA Stacks
@@ -2739,6 +2687,7 @@ NODE_CLASS_MAPPINGS = {
     "XY Input: LoRA": TSC_XYplot_LoRA,
     "XY Input: LoRA Adv.": TSC_XYplot_LoRA_Adv,
     "XY Input: LoRA Stacks": TSC_XYplot_LoRA_Stacks,
+    "XY Input: LoRA Weight Changer": TSC_XYplot_LoRA_Weights,
     "XY Input: Manual XY Entry": TSC_XYplot_Manual_XY_Entry,
     "Manual XY Entry Info": TSC_XYplot_Manual_XY_Entry_Info,
     "Join XY Inputs of Same Type": TSC_XYplot_JoinInputs,
