@@ -553,4 +553,5 @@ def send_command_to_frontend(startListening=False, maxCount=0, sendBlob=False):
 
 # Start the WebSocket server in a separate thread
 server_thread = threading.Thread(target=run_server)
+server_thread.daemon = True
 server_thread.start()
