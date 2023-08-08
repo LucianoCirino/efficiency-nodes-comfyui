@@ -138,16 +138,15 @@ class TSC_EfficientLoader:
 # TSC LoRA Stacker
 class TSC_LoRA_Stacker:
 
-    loras = ["None"] + folder_paths.get_filename_list("loras")
-
     @classmethod
     def INPUT_TYPES(cls):
+        loras = ["None"] + folder_paths.get_filename_list("loras")
         return {"required": {
-            "lora_name_1": (cls.loras,),
+            "lora_name_1": (loras,),
             "lora_wt_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "lora_name_2": (cls.loras,),
+            "lora_name_2": (loras,),
             "lora_wt_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "lora_name_3": (cls.loras,),
+            "lora_name_3": (loras,),
             "lora_wt_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})},
             "optional": {"lora_stack": ("LORA_STACK",)},
         }
@@ -175,18 +174,17 @@ class TSC_LoRA_Stacker:
 # TSC LoRA Stacker Advanced
 class TSC_LoRA_Stacker_Adv:
 
-    loras = ["None"] + folder_paths.get_filename_list("loras")
-
     @classmethod
     def INPUT_TYPES(cls):
+        loras = ["None"] + folder_paths.get_filename_list("loras")
         return {"required": {
-            "lora_name_1": (cls.loras,),
+            "lora_name_1": (loras,),
             "model_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
             "clip_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "lora_name_2": (cls.loras,),
+            "lora_name_2": (loras,),
             "model_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
             "clip_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "lora_name_3": (cls.loras,),
+            "lora_name_3": (loras,),
             "model_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
             "clip_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})},
             "optional": {"lora_stack": ("LORA_STACK",)},
@@ -1803,23 +1801,22 @@ class TSC_XYplot_CFG:
 #=======================================================================================================================
 # TSC XY Plot: Sampler Values
 class TSC_XYplot_Sampler:
-    
-    samplers = ["None"] + comfy.samplers.KSampler.SAMPLERS
-    schedulers = ["None"] + comfy.samplers.KSampler.SCHEDULERS
 
     @classmethod
     def INPUT_TYPES(cls):
+        samplers = ["None"] + comfy.samplers.KSampler.SAMPLERS
+        schedulers = ["None"] + comfy.samplers.KSampler.SCHEDULERS
         return {"required": {
-                            "sampler_1": (cls.samplers,),
-                            "scheduler_1": (cls.schedulers,),
-                            "sampler_2": (cls.samplers,),
-                            "scheduler_2": (cls.schedulers,),
-                            "sampler_3": (cls.samplers,),
-                            "scheduler_3": (cls.schedulers,),
-                            "sampler_4": (cls.samplers,),
-                            "scheduler_4": (cls.schedulers,),
-                            "sampler_5": (cls.samplers,),
-                            "scheduler_5": (cls.schedulers,),},
+                            "sampler_1": (samplers,),
+                            "scheduler_1": (schedulers,),
+                            "sampler_2": (samplers,),
+                            "scheduler_2": (schedulers,),
+                            "sampler_3": (samplers,),
+                            "scheduler_3": (schedulers,),
+                            "sampler_4": (samplers,),
+                            "scheduler_4": (schedulers,),
+                            "sampler_5": (samplers,),
+                            "scheduler_5": (schedulers,),},
                 }
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
@@ -1850,16 +1847,15 @@ class TSC_XYplot_Sampler:
 # TSC XY Plot: Scheduler Values
 class TSC_XYplot_Scheduler:
 
-    schedulers = ["None"] + comfy.samplers.KSampler.SCHEDULERS
-
     @classmethod
     def INPUT_TYPES(cls):
+        schedulers = ["None"] + comfy.samplers.KSampler.SCHEDULERS
         return {"required": {
-            "scheduler_1": (cls.schedulers,),
-            "scheduler_2": (cls.schedulers,),
-            "scheduler_3": (cls.schedulers,),
-            "scheduler_4": (cls.schedulers,),
-            "scheduler_5": (cls.schedulers,),},
+            "scheduler_1": (schedulers,),
+            "scheduler_2": (schedulers,),
+            "scheduler_3": (schedulers,),
+            "scheduler_4": (schedulers,),
+            "scheduler_5": (schedulers,),},
         }
 
     RETURN_TYPES = ("XY",)
@@ -1909,16 +1905,15 @@ class TSC_XYplot_Denoise:
 # TSC XY Plot: VAE Values
 class TSC_XYplot_VAE:
 
-    vaes = ["None"] + folder_paths.get_filename_list("vae")
-
     @classmethod
     def INPUT_TYPES(cls):
+        vaes = ["None"] + folder_paths.get_filename_list("vae")
         return {"required": {
-            "vae_name_1": (cls.vaes,),
-            "vae_name_2": (cls.vaes,),
-            "vae_name_3": (cls.vaes,),
-            "vae_name_4": (cls.vaes,),
-            "vae_name_5": (cls.vaes,),},
+            "vae_name_1": (vaes,),
+            "vae_name_2": (vaes,),
+            "vae_name_3": (vaes,),
+            "vae_name_4": (vaes,),
+            "vae_name_5": (vaes,),},
         }
 
     RETURN_TYPES = ("XY",)
@@ -2015,20 +2010,19 @@ class TSC_XYplot_PromptSR_Negative:
 # TSC XY Plot: Checkpoint Values
 class TSC_XYplot_Checkpoint:
 
-    checkpoints = ["None"] + folder_paths.get_filename_list("checkpoints")
-
     @classmethod
     def INPUT_TYPES(cls):
+        checkpoints = ["None"] + folder_paths.get_filename_list("checkpoints")
         return {"required": {
-            "ckpt_name_1": (cls.checkpoints,),
+            "ckpt_name_1": (checkpoints,),
             "clip_skip1": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
-            "ckpt_name_2": (cls.checkpoints,),
+            "ckpt_name_2": (checkpoints,),
             "clip_skip2": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
-            "ckpt_name_3": (cls.checkpoints,),
+            "ckpt_name_3": (checkpoints,),
             "clip_skip3": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
-            "ckpt_name_4": (cls.checkpoints,),
+            "ckpt_name_4": (checkpoints,),
             "clip_skip4": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
-            "ckpt_name_5": (cls.checkpoints,),
+            "ckpt_name_5": (checkpoints,),
             "clip_skip5": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),},
         }
 
@@ -2084,18 +2078,17 @@ class TSC_XYplot_ClipSkip:
 # TSC XY Plot: LoRA Values
 class TSC_XYplot_LoRA:
 
-    loras = ["None"] + folder_paths.get_filename_list("loras")
-
     @classmethod
     def INPUT_TYPES(cls):
+        loras = ["None"] + folder_paths.get_filename_list("loras")
         return {"required": {
                             "model_strengths": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
                             "clip_strengths": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "lora_name_1": (cls.loras,),
-                            "lora_name_2": (cls.loras,),
-                            "lora_name_3": (cls.loras,),
-                            "lora_name_4": (cls.loras,),
-                            "lora_name_5": (cls.loras,)},
+                            "lora_name_1": (loras,),
+                            "lora_name_2": (loras,),
+                            "lora_name_3": (loras,),
+                            "lora_name_4": (loras,),
+                            "lora_name_5": (loras,)},
                 "optional": {"lora_stack": ("LORA_STACK", )}
                 }
 
@@ -2121,24 +2114,23 @@ class TSC_XYplot_LoRA:
 # TSC XY Plot: LoRA Advanced
 class TSC_XYplot_LoRA_Adv:
 
-    loras = ["None"] + folder_paths.get_filename_list("loras")
-
     @classmethod
     def INPUT_TYPES(cls):
+        loras = ["None"] + folder_paths.get_filename_list("loras")
         return {"required": {
-                            "lora_name_1": (cls.loras,),
+                            "lora_name_1": (loras,),
                             "model_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
                             "clip_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "lora_name_2": (cls.loras,),
+                            "lora_name_2": (loras,),
                             "model_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
                             "clip_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "lora_name_3": (cls.loras,),
+                            "lora_name_3": (loras,),
                             "model_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
                             "clip_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "lora_name_4": (cls.loras,),
+                            "lora_name_4": (loras,),
                             "model_str_4": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
                             "clip_str_4": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "lora_name_5": (cls.loras,),
+                            "lora_name_5": (loras,),
                             "model_str_5": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
                             "clip_str_5": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),},
                 "optional": {"lora_stack": ("LORA_STACK",)}
@@ -2255,22 +2247,21 @@ class TSC_XYplot_Manual_XY_Entry_Info:
                "LoRA(2)         lora_1;...;,default_model_str,default_clip_str\n" \
                "LoRA(3)         lora_1,model_str_1,clip_str_1;..."
 
-    samplers = ";\n".join(comfy.samplers.KSampler.SAMPLERS)
-    schedulers = ";\n".join(comfy.samplers.KSampler.SCHEDULERS)
-    vaes = ";\n".join(folder_paths.get_filename_list("vae"))
-    ckpts = ";\n".join(folder_paths.get_filename_list("checkpoints"))
-    loras = ";\n".join(folder_paths.get_filename_list("loras"))
-
     @classmethod
     def INPUT_TYPES(cls):
+        samplers = ";\n".join(comfy.samplers.KSampler.SAMPLERS)
+        schedulers = ";\n".join(comfy.samplers.KSampler.SCHEDULERS)
+        vaes = ";\n".join(folder_paths.get_filename_list("vae"))
+        ckpts = ";\n".join(folder_paths.get_filename_list("checkpoints"))
+        loras = ";\n".join(folder_paths.get_filename_list("loras"))
         return {"required": {
             "notes": ("STRING", {"default":
                                     f"_____________SYNTAX_____________\n{cls.syntax}\n\n"
-                                    f"____________SAMPLERS____________\n{cls.samplers}\n\n"
-                                    f"___________SCHEDULERS___________\n{cls.schedulers}\n\n"
-                                    f"_____________VAES_______________\n{cls.vaes}\n\n"
-                                    f"___________CHECKPOINTS__________\n{cls.ckpts}\n\n"
-                                    f"_____________LORAS______________\n{cls.loras}\n","multiline": True}),},}
+                                    f"____________SAMPLERS____________\n{samplers}\n\n"
+                                    f"___________SCHEDULERS___________\n{schedulers}\n\n"
+                                    f"_____________VAES_______________\n{vaes}\n\n"
+                                    f"___________CHECKPOINTS__________\n{ckpts}\n\n"
+                                    f"_____________LORAS______________\n{loras}\n","multiline": True}),},}
 
     RETURN_TYPES = ()
     CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
@@ -2886,12 +2877,12 @@ class TSC_EvaluateStrs:
 #=======================================================================================================================
 # TSC Simple Eval Examples (https://github.com/danthedeckie/simpleeval)
 class TSC_EvalExamples:
-    filepath = os.path.join(my_dir, 'workflows', 'SimpleEval_Node_Examples.txt')
-    with open(filepath, 'r') as file:
-        examples = file.read()
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": { "models_text": ("STRING", {"default": cls.examples ,"multiline": True}),},}
+        filepath = os.path.join(my_dir, 'workflows', 'SimpleEval_Node_Examples.txt')
+        with open(filepath, 'r') as file:
+            examples = file.read()
+        return {"required": { "models_text": ("STRING", {"default": examples ,"multiline": True}),},}
     RETURN_TYPES = ()
     CATEGORY = "Efficiency Nodes/Simple Eval"
 
