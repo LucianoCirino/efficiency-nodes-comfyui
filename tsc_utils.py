@@ -515,9 +515,6 @@ import base64
 from io import BytesIO
 from torchvision import transforms
 
-# Import my functions
-from tsc_utils import *
-
 latest_image = None
 connected_client = None
 
