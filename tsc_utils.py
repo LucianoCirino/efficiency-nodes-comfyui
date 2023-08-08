@@ -460,24 +460,35 @@ def global_preview_method():
     return args.preview_method
 
 #-----------------------------------------------------------------------------------------------------------------------
-# Auto install Efficiency Nodes Python packages
+# Auto install Efficiency Nodes Python package dependencies
 import subprocess
 
-def install_packages(required_packages):
-    installed_packages = packages(versions=False)
+# Note: Auto installer targets ComfyUI's python_embedded folder
+
+def install_packages(my_dir):
+    # Compute path to the target site-packages
+    target_dir = os.path.abspath(os.path.join(my_dir, '..', '..', '..', 'python_embeded', 'Lib', 'site-packages'))
+    embedded_python_exe = os.path.abspath(os.path.join(my_dir, '..', '..', '..', 'python_embeded', 'python.exe'))
+
+    # Load packages from requirements.txt
+    with open(os.path.join(my_dir, 'requirements.txt'), 'r') as f:
+        required_packages = [line.strip() for line in f if line.strip()]
+
+    installed_packages = packages(embedded_python_exe, versions=False)
     for pkg in required_packages:
         if pkg not in installed_packages:
-            print(f"\033[32mEfficiency Nodes:\033[0m Installing {pkg}...")
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
-            print(f"\033[32mEfficiency Nodes:\033[0m Installed {pkg}!")
+            print(f"\033[32mEfficiency Nodes:\033[0m Installing required package '{pkg}'...", end='', flush=True)
+            subprocess.check_call(['pip', 'install', pkg, '--target=' + target_dir, '--no-warn-script-location',
+                                   '--disable-pip-version-check'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f"\r\033[32mEfficiency Nodes:\033[0m Installing required package '{pkg}'... Installed!", flush=True)
 
-def packages(versions=False):
+def packages(python_exe, versions=False):
+    # Get packages of the embedded Python environment
     return [(r.decode().split('==')[0] if not versions else r.decode()) for r in
-            subprocess.check_output([sys.executable, '-m', 'pip', 'freeze']).split()]
+            subprocess.check_output([python_exe, '-m', 'pip', 'freeze']).split()]
 
-# Packages to install
-required_packages = ['simpleeval', 'websockets']
-install_packages(required_packages)
+# Install missing packages
+install_packages(my_dir)
 
 #-----------------------------------------------------------------------------------------------------------------------
 # Auto install efficiency nodes web extension '\js\efficiency_nodes.js' to 'ComfyUI\web\extensions'
