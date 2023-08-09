@@ -22,7 +22,7 @@ Efficiency Nodes for ComfyUI
 
 - Modded KSamplers with the ability to live preview generations and/or vae decode images.
 - Used for running the XY Plot script.   <i>('sampler_state' = "Script")</i>
-- Can re-output its last generated outputs by force.   <i>('sampler_state' = "Hold")</i>
+- Can be set to re-output their last outputs by force.   <i>('sampler_state' = "Hold")</i>
 
 <p align="center">
   <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20KSampler%20(Efficient).png?raw=true" width="320">
