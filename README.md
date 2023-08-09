@@ -8,7 +8,7 @@ Efficiency Nodes for ComfyUI
   
 - A combination of common initialization nodes.
 - Able to load LoRA and Control Net stacks via its 'lora_stack' and 'cnet_stack' inputs.
-- Can cache multiple Checkpoint, VAE, and LoRA models via the configuration file 'node_settings.json'.
+- Can cache multiple Checkpoint, VAE, and LoRA models.   <i>(cache settings found in config file 'node_settings.json')</i>
 - Used by the XY Plot node for many of its plot type dependencies.
 
 <p align="center">
