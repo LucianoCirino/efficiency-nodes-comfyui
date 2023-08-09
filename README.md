@@ -39,5 +39,8 @@ Efficiency Nodes for ComfyUI
 
 <img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/Image Overlay (overview).png" width="720">
 
+### Dependencies
+Dependencies should be auto installed during ComfyUI boot up.
+
 ## **Install:**
 To install, drop the "_**efficiency-nodes-comfyui**_" folder into the "_**...\ComfyUI\ComfyUI\custom_nodes**_" directory and restart UI.
