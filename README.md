@@ -2,28 +2,72 @@ Efficiency Nodes for ComfyUI
 =======
 ### A collection of <a href="https://github.com/comfyanonymous/ComfyUI" >ComfyUI</a> custom nodes to help streamline workflows and reduce total node count.
 ## [Direct Download Link](https://github.com/LucianoCirino/efficiency-nodes-comfyui/releases/download/v1.72/efficiency-nodes-comfyui_V1-72.zip)
-
-## **Currently Available Nodes:**
-<details><summary>Ksampler (Efficient)</summary><ul>
-• A modded KSampler with the ability to preview/output images and run scripts.<br>
-</ul></details>
-
-<details><summary>Efficient Loader</summary><ul>
-• A combination of common initialization nodes.
-</ul></details>
-
-<details><summary>XY Plotter Nodes</summary><ul>
-• A collection of nodes that allows users to specify parameters for the KSampler (Efficient) to plot on a grid.
-</ul></details>
-
-<details><summary>Image Overlay</summary><ul>
-• Node that allows for flexible image overlaying.
-</ul></details>
-
-<details><summary>SimpleEval Nodes</summary><ul>
-•  A collection of nodes that allows users to write simple Python expressions for a variety of data types using the "<a href="https://github.com/danthedeckie/simpleeval" >simpleeval</a>" library.
+<!-------------------------------------------------------------------------------------------------------------------------------------------------------->
+<details>
+    <summary>Efficient Loader</summary>
   
-</ul></details>
+- A combination of common initialization nodes.
+- Able to load LoRA and Control Net stacks via its 'lora_stack' and 'cnet_stack' inputs.
+- Can cache multiple Checkpoint, VAE, and LoRA models via the configuration file 'node_settings.json'.
+- Used by the XY Plot node for many of its plot type dependencies.
+
+<p align="center">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Efficient%20Loader.png?raw=true" width="320">
+</p>
+
+</details>
+<!-------------------------------------------------------------------------------------------------------------------------------------------------------->
+<details>
+    <summary>Ksampler & Ksampler Adv. (Efficient)</summary>
+
+- Modded KSamplers with the ability to live preview generations and/or vae decode images.
+- Used for running the XY Plot script.   <i>('sampler_state' = "Script")</i>
+- Can re-output its last generated outputs by force.   <i>('sampler_state' = "Hold")</i>
+
+<p align="center">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20KSampler%20(Efficient).png?raw=true" width="320">
+  &nbsp; &nbsp; &nbsp; &nbsp;
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20KSampler%20Adv.%20(Efficient).png?raw=true" width="320">
+</p>
+
+</details>
+<!-------------------------------------------------------------------------------------------------------------------------------------------------------->
+<details>
+    <summary>XY Plot</summary>
+  
+- Node that allows users to specify parameters for the Efficient KSampler's to plot on a grid.
+
+<p align="center">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20XY%20Plot.png?raw=true" width="320">
+</p>
+
+</details>
+<!-------------------------------------------------------------------------------------------------------------------------------------------------------->
+<details>
+    <summary>Image Overlay</summary>
+  
+- Node that allows for flexible image overlaying. Works also with image batches.
+
+<p align="center">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Image%20Overlay.png?raw=true" width="320">
+</p>
+
+</details>
+<!-------------------------------------------------------------------------------------------------------------------------------------------------------->
+<details>
+    <summary>SimpleEval Nodes</summary>
+
+- A collection of nodes that allows users to write simple Python expressions for a variety of data types using the "<a href="https://github.com/danthedeckie/simpleeval" >simpleeval</a>" library.
+
+<p align="center">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Evaluate%20Integers.png?raw=true" width="320">
+  &nbsp; &nbsp;
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Evaluate%20Floats.png?raw=true" width="320">
+  &nbsp; &nbsp;
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Evaluate%20Strings.png?raw=true" width="320">
+</p>
+
+</details>
 
 ## **Examples:**
   
