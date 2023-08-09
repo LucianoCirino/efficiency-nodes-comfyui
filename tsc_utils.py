@@ -9,6 +9,7 @@ import io
 from contextlib import contextmanager
 import json
 import folder_paths
+from typing import Dict, List
 
 # Get the absolute path of the parent directory of the current script
 my_dir = os.path.dirname(os.path.abspath(__file__))
