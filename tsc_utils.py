@@ -517,7 +517,7 @@ shutil.copy2(source_path, destination_path)
 #-----------------------------------------------------------------------------------------------------------------------
 # Establish a websocket connection to communicate with "efficiency-nodes.js" under:
 # ComfyUI\web\extensions\efficiency-nodes-comfyui\
-import websockets #https://github.com/python-websockets/websockets
+import websockets
 import asyncio
 import threading
 import base64
@@ -526,6 +526,16 @@ from torchvision import transforms
 
 latest_image = None
 connected_client = None
+websocket_status = True
+
+def handle_websocket_failure():
+    global websocket_status
+    if websocket_status:  # Ensures the message is printed only once
+        websocket_status = False
+        print(f"\r\033[33mEfficiency Nodes Warning:\033[0m Websocket connection failure.\n"
+              f"Live-generated preview images from the KSampler (Efficient) may not be cleared correctly. "
+              f"This can lead to extra images appearing in the node's preview results when live generation "
+              f"preview is enabled and vae decoding is set to 'true`.")
 
 async def server_logic(websocket, path):
     global latest_image, connected_client
@@ -543,22 +553,28 @@ async def server_logic(websocket, path):
 def run_server():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    start_server = websockets.serve(server_logic, "127.0.0.1", 8288)
-    loop.run_until_complete(start_server)
-    loop.run_forever()
+    try:
+        start_server = websockets.serve(server_logic, "127.0.0.1", 8288)
+        loop.run_until_complete(start_server)
+        loop.run_forever()
+    except Exception:  # Catch all exceptions
+        handle_websocket_failure()
 
 def get_latest_image():
     return latest_image
 
 # Function to send commands to frontend
 def send_command_to_frontend(startListening=False, maxCount=0, sendBlob=False):
-    global connected_client
-    if connected_client:
-        asyncio.run(connected_client.send(json.dumps({
-            'startProcessing': startListening,
-            'maxCount': maxCount,
-            'sendBlob': sendBlob
-        })))
+    global connected_client, websocket_status
+    if connected_client and websocket_status:
+        try:
+            asyncio.run(connected_client.send(json.dumps({
+                'startProcessing': startListening,
+                'maxCount': maxCount,
+                'sendBlob': sendBlob
+            })))
+        except Exception:
+            handle_websocket_failure()
 
 # Start the WebSocket server in a separate thread
 server_thread = threading.Thread(target=run_server)
