@@ -526,6 +526,7 @@ from torchvision import transforms
 
 latest_image = None
 connected_client = None
+websocket_status = True
 
 async def server_logic(websocket, path):
     global latest_image, connected_client
@@ -543,9 +544,16 @@ async def server_logic(websocket, path):
 def run_server():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    start_server = websockets.serve(server_logic, "127.0.0.1", 8288)
-    loop.run_until_complete(start_server)
-    loop.run_forever()
+    try:
+        start_server = websockets.serve(server_logic, "127.0.0.1", 8288)
+        loop.run_until_complete(start_server)
+        loop.run_forever()
+    except Exception:  # Catch all exceptions
+        websocket_status = False
+        print(f"\r\033[33mEfficiency Nodes Warning:\033[0m Websocket connection failure.\n"
+              f"Live-generated preview images from the KSampler (Efficient) may not be cleared correctly. "
+              f"This can lead to extra images appearing in the node's preview results when live generation "
+              f"preview is enabled and vae decoding is set to 'true`.")
 
 def get_latest_image():
     return latest_image
