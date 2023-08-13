@@ -462,8 +462,10 @@ def global_preview_method():
 #-----------------------------------------------------------------------------------------------------------------------
 # Auto install Efficiency Nodes Python package dependencies
 import subprocess
-
-# Note: Auto installer targets ComfyUI's python_embedded folder
+# Note: Auto installer install packages inside the requirements.txt.
+#       It first trys ComfyUI's python_embedded folder if python.exe exists inside ...\ComfyUI_windows_portable\python_embeded.
+#       If no python.exe is found, it attempts a general global pip install of packages.
+#       On an error, an user is directed to attempt manually installing the packages themselves.
 
 def install_packages(my_dir):
     # Compute path to the target site-packages
@@ -481,12 +483,21 @@ def install_packages(my_dir):
     for pkg in required_packages:
         if pkg not in installed_packages:
             print(f"\033[32mEfficiency Nodes:\033[0m Installing required package '{pkg}'...", end='', flush=True)
-            if use_embedded:  # Targeted installation
-                subprocess.check_call(['pip', 'install', pkg, '--target=' + target_dir, '--no-warn-script-location',
-                                       '--disable-pip-version-check'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:  # Untargeted installation
-                subprocess.check_call(['pip', 'install', pkg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            print(f"\r\033[32mEfficiency Nodes:\033[0m Installing required package '{pkg}'... Installed!", flush=True)
+            try:
+                if use_embedded:  # Targeted installation
+                    subprocess.check_call(['pip', 'install', pkg, '--target=' + target_dir, '--no-warn-script-location',
+                                           '--disable-pip-version-check'], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                else:  # Untargeted installation
+                    subprocess.check_call(['pip', 'install', pkg], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                print(f"\r\033[32mEfficiency Nodes:\033[0m Installing required package '{pkg}'... Installed!", flush=True)
+
+            except subprocess.CalledProcessError as e: # Failed installation
+                base_message = f"\r\033[31mEfficiency Nodes Error:\033[0m Failed to install python package '{pkg}'. "
+                if e.stderr:
+                    error_message = e.stderr.decode()
+                    print(base_message + f"Error message: {error_message}")
+                else:
+                    print(base_message + "\nPlease check your permissions, network connectivity, or try a manual installation.")
 
 def packages(python_exe=None, versions=False):
     # Get packages of the active or embedded Python environment
@@ -517,25 +528,27 @@ shutil.copy2(source_path, destination_path)
 #-----------------------------------------------------------------------------------------------------------------------
 # Establish a websocket connection to communicate with "efficiency-nodes.js" under:
 # ComfyUI\web\extensions\efficiency-nodes-comfyui\
-import websockets
-import asyncio
-import threading
-import base64
-from io import BytesIO
-from torchvision import transforms
-
-latest_image = list()
-connected_client = None
-websocket_status = True
-
 def handle_websocket_failure():
     global websocket_status
     if websocket_status:  # Ensures the message is printed only once
         websocket_status = False
-        print(f"\r\033[33mEfficiency Nodes Warning:\033[0m Websocket connection failure.\n"
-              f"Live-generated preview images from the KSampler (Efficient) may not be cleared correctly. "
-              f"This can lead to extra images appearing in the node's preview results when live generation "
-              f"preview is enabled and vae decoding is set to 'true`.")
+        print(f"\r\033[33mEfficiency Nodes Warning:\033[0m Websocket connection failure."
+              f"\nEfficient KSampler's live preview images may not clear when vae decoding is set to 'true'.")
+
+# Initialize websocket related global variables
+websocket_status = True
+latest_image = list()
+connected_client = None
+
+try:
+    import websockets
+    import asyncio
+    import threading
+    import base64
+    from io import BytesIO
+    from torchvision import transforms
+except ImportError:
+    handle_websocket_failure()
 
 async def server_logic(websocket, path):
     global latest_image, connected_client, websocket_status
@@ -586,6 +599,7 @@ def send_command_to_frontend(startListening=False, maxCount=0, sendBlob=False):
             handle_websocket_failure()
 
 # Start the WebSocket server in a separate thread
-server_thread = threading.Thread(target=run_server)
-server_thread.daemon = True
-server_thread.start()
+if websocket_status == True:
+    server_thread = threading.Thread(target=run_server)
+    server_thread.daemon = True
+    server_thread.start()

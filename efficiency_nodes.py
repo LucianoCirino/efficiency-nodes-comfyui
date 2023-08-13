@@ -39,11 +39,8 @@ import comfy.sd
 import comfy.utils
 import comfy.latent_formats
 
-# Import my library
+# Import my utility functions
 from tsc_utils import *
-
-# Import dependencies
-import simpleeval
 
 MAX_RESOLUTION=8192
 
@@ -262,7 +259,7 @@ class TSC_KSampler:
                      "latent_image": ("LATENT",),
                      "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                      "preview_method": (["auto", "latent2rgb", "taesd", "none"],),
-                     "vae_decode": (["true", "false", "output only"],),
+                     "vae_decode": (["true", "true (tiled)", "false", "output only", "output only (tiled)"],),
                      },
                 "optional": { "optional_vae": ("VAE",),
                               "script": ("SCRIPT",),},
@@ -294,22 +291,6 @@ class TSC_KSampler:
             print('\033[33mKSampler(Efficient) Warning:\033[0m No vae input detected, proceeding as if vae_decode was false.\n')
             vae_decode = "false"
 
-        # Extract node_settings from json
-        def get_settings():
-            # Get the directory path of the current file
-            my_dir = os.path.dirname(os.path.abspath(__file__))
-            # Construct the file path for node_settings.json
-            settings_file = os.path.join(my_dir, 'node_settings.json')
-            # Load the settings from the JSON file
-            with open(settings_file, 'r') as file:
-                node_settings = json.load(file)
-            # Retrieve the settings
-            kse_vae_tiled = node_settings.get("KSampler (Efficient)", {}).get('vae_tiled', False)
-            xy_vae_tiled = node_settings.get("XY Plot", {}).get('vae_tiled', False)
-            return kse_vae_tiled, xy_vae_tiled
-
-        kse_vae_tiled, xy_vae_tiled = get_settings()
-
         # Functions for previewing images in Ksampler
         def map_filename(filename):
             prefix_len = len(os.path.basename(filename_prefix))
@@ -325,7 +306,7 @@ class TSC_KSampler:
             input = input.replace("%height%", str(images[0].shape[0]))
             return input
 
-        def preview_images(images, filename_prefix):
+        def preview_image(images, filename_prefix):
 
             if images == list():
                 return list()
@@ -387,8 +368,8 @@ class TSC_KSampler:
             last_helds[key].append((new_value, my_unique_id))
             return True
 
-        def vae_decode_latent(latent, kse_vae_tiled):
-            return vae.decode_tiled(latent).cpu() if kse_vae_tiled else vae.decode(latent).cpu()
+        def vae_decode_latent(latent, vae_decode):
+            return vae.decode_tiled(latent).cpu() if "tiled" in vae_decode else vae.decode(latent).cpu()
 
         # Clean globally stored objects of non-existant nodes
         globals_cleanup(prompt)
@@ -429,13 +410,8 @@ class TSC_KSampler:
             set_preview_method(preview_method)
 
             # Define commands arguments to send to front-end via websocket
-            if preview_method != "none":
-                if vae_decode == "true":
-                    sendBlob = False
-                else:
-                    # Send back the last blob image through websocket for display
-                    sendBlob = True
-                send_command_to_frontend(startListening=True, maxCount=steps-1, sendBlob=sendBlob)
+            if preview_method != "none" and "true" in vae_decode:
+                send_command_to_frontend(startListening=True, maxCount=steps-1, sendBlob=False)
 
             # Sample the latent_image(s) using the Comfy KSampler nodes
             if ksampler_adv_flag == False:
@@ -450,43 +426,22 @@ class TSC_KSampler:
             # Cache latent samples in the 'last_helds' dictionary "latent"
             update_value_by_id("latent", my_unique_id, latent)
 
-            # Define next Hold's vae_decode behavior
+            # Define node output images & next Hold's vae_decode behavior
+            output_images = node_images = get_latest_image() ###
             if vae_decode == "false":
-                # Enable vae decode on next Hold
                 update_value_by_id("vae_decode_flag", my_unique_id, True)
-            else:
-                # Disable vae decode on next Hold
-                update_value_by_id("vae_decode_flag", my_unique_id, False)
-
-            # Define node image outputs
-            if vae_decode == "false":
-                if preview_method == "none":
+                if preview_method == "none" or output_images == list():
                     output_images = TSC_KSampler.empty_image
-                    node_images = list()
-                else:
-                    output_images = node_images = get_latest_image()
-
-            elif vae_decode == "true":
-                decoded_image = vae_decode_latent(latent, kse_vae_tiled)
-                if preview_method == "none":
-                    output_images = node_images = decoded_image
-                else:
-                    output_images = node_images = decoded_image
-
-            elif vae_decode == "output only":
-                decoded_image = vae_decode_latent(latent, kse_vae_tiled)
-                if preview_method == "none":
-                    output_images = decoded_image
-                    node_images = list()
-                else:
-                    output_images = decoded_image
-                    node_images = get_latest_image()
+            else:
+                update_value_by_id("vae_decode_flag", my_unique_id, False)
+                decoded_image = vae_decode_latent(latent, vae_decode)
+                output_images = node_images = decoded_image
 
             # Cache output images to global 'last_helds' dictionary "output_images"
             update_value_by_id("output_images", my_unique_id, output_images)
 
             # Generate preview_images (PIL)
-            preview_images = preview_images(node_images, filename_prefix)
+            preview_images = preview_image(node_images, filename_prefix)
 
             # Cache node preview images to global 'last_helds' dictionary "preview_images"
             update_value_by_id("preview_images", my_unique_id, preview_images)
@@ -494,32 +449,32 @@ class TSC_KSampler:
             # Set xy_plot_flag to 'False' and set the stored (if any) XY Plot image tensor to 'None'
             update_value_by_id("xy_plot_flag", my_unique_id, False)
             update_value_by_id("xy_plot_image", my_unique_id, None)
-            
+
+            if "output only" in vae_decode:
+                preview_images = list()
+
             if preview_method != "none":
                 # Send message to front-end to revoke the last blob image from browser's memory (fixes preview duplication bug)
                 send_command_to_frontend(startListening=False)
-                
-            return {"ui": {"images": preview_images},
-                    "result": (model, positive, negative, {"samples": latent}, vae, output_images,)}
+
+            result = (model, positive, negative, {"samples": latent}, vae, output_images,)
+            return result if not preview_images else {"ui": {"images": preview_images}, "result": result}
 
         # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
         # If the sampler state is "Hold"
         elif sampler_state == "Hold":
+            output_images = last_output_images
+            preview_images = last_preview_images if "true" in vae_decode else list()
 
             if get_value_by_id("vae_decode_flag", my_unique_id):
-                if vae_decode in ["true", "output only"]:
-                    output_images = node_images = vae_decode_latent(last_latent["samples"], kse_vae_tiled)
+                if "true" in vae_decode or "output only" in vae_decode:
+                    output_images = node_images = vae_decode_latent(last_latent["samples"], vae_decode)
                     update_value_by_id("vae_decode_flag", my_unique_id, False)
                     update_value_by_id("output_images", my_unique_id, output_images)
-
-                    if vae_decode == "true":
-                        preview_images = preview_images(node_images, filename_prefix)
-                        update_value_by_id("preview_images", my_unique_id, preview_images)
-                    else:  # image output only
-                        preview_images = last_preview_images
-                else:
-                    output_images = last_output_images
-                    preview_images = last_preview_images
+                    preview_images = preview_image(node_images, filename_prefix)
+                    update_value_by_id("preview_images", my_unique_id, preview_images)
+                    if "output only" in vae_decode:
+                        preview_images = list()
 
             # Check if holding an XY Plot image
             elif get_value_by_id("xy_plot_flag", my_unique_id):
@@ -532,14 +487,10 @@ class TSC_KSampler:
                         output_images = get_value_by_id("xy_plot_image", my_unique_id)
                     else:
                         output_images = get_value_by_id("output_images", my_unique_id)
-                    preview_images = last_preview_images #if vae_decode == "true" else list()
+                    preview_images = last_preview_images
                 else:
                     output_images = last_output_images
-                    preview_images = last_preview_images if vae_decode == "true" else list()
-                    
-            else:
-                output_images = last_output_images
-                preview_images = last_preview_images if vae_decode == "true" else list()
+                    preview_images = last_preview_images if "true" in vae_decode else list()
 
             return {"ui": {"images": preview_images},
                     "result": (model, positive, negative, {"samples": last_latent["samples"]}, vae, output_images,)}
@@ -564,7 +515,7 @@ class TSC_KSampler:
                         "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
 
             # If vae_decode is not set to true, print message that changing it to true
-            if vae_decode != "true":
+            if "true" not in vae_decode:
                 print('\033[33mKSampler(Efficient) Warning:\033[0m VAE decoding must be set to \'true\''
                     ' for XY Plot script, proceeding as if \'true\'.\n')
 
@@ -965,7 +916,7 @@ class TSC_KSampler:
                 # ______________________________________________________________________________________________________
                 # The below function is used to generate the results based on all the processed variables
                 def process_values(model, add_noise, seed, steps, start_at_step, end_at_step, return_with_leftover_noise,
-                                   cfg, sampler_name, scheduler, positive, negative, latent_image, denoise, vae,
+                                   cfg, sampler_name, scheduler, positive, negative, latent_image, denoise, vae, vae_decode,
                                    ksampler_adv_flag, latent_list=[], image_tensor_list=[], image_pil_list=[]):
 
                     if preview_method != "none":
@@ -987,10 +938,7 @@ class TSC_KSampler:
                     latent_list.append(latent)
 
                     # Decode the latent tensor
-                    if xy_vae_tiled == False:
-                        image = vae.decode(latent).cpu()
-                    else:
-                        image = vae.decode_tiled(latent).cpu()
+                    image = vae_decode_latent(latent, vae_decode)
 
                     # Add the resulting image tensor to image_tensor_list
                     image_tensor_list.append(image)
@@ -1053,7 +1001,7 @@ class TSC_KSampler:
                         latent_list, image_tensor_list, image_pil_list = \
                             process_values(model, add_noise, seed_updated, steps, start_at_step, end_at_step,
                                            return_with_leftover_noise, cfg, sampler_name, scheduler[0],
-                                           positive, negative, latent_image, denoise, vae, ksampler_adv_flag)
+                                           positive, negative, latent_image, denoise, vae, vae_decode, ksampler_adv_flag)
 
                     elif X_type != "Nothing" and Y_type != "Nothing":
                         # Seed control based on loop index during Batch
@@ -1080,7 +1028,7 @@ class TSC_KSampler:
                             latent_list, image_tensor_list, image_pil_list = \
                                 process_values(model, add_noise, seed_updated, steps, start_at_step, end_at_step,
                                                return_with_leftover_noise, cfg, sampler_name, scheduler[0],
-                                               positive, negative, latent_image, denoise, vae, ksampler_adv_flag)
+                                               positive, negative, latent_image, denoise, vae, vae_decode, ksampler_adv_flag)
 
                 # Clean up cache
                 if cache_models == "False":
@@ -1470,7 +1418,7 @@ class TSC_KSampler:
             update_value_by_id("xy_plot_flag", my_unique_id, True)
 
              # Generate the preview_images and cache results
-            preview_images = preview_images(xy_plot_image, filename_prefix)
+            preview_images = preview_image(xy_plot_image, filename_prefix)
             update_value_by_id("preview_images", my_unique_id, preview_images)
 
             # Generate output_images and cache results
@@ -1519,7 +1467,7 @@ class TSC_KSamplerAdvanced(TSC_KSampler):
                      "end_at_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
                      "return_with_leftover_noise": (["disable", "enable"],),
                      "preview_method": (["auto", "latent2rgb", "taesd", "none"],),
-                     "vae_decode": (["true", "false",  "output only"],),
+                     "vae_decode": (["true", "true (tiled)", "false", "output only", "output only (tiled)"],),
                      },
                 "optional": {"optional_vae": ("VAE",),
                              "script": ("SCRIPT",), },
@@ -2782,111 +2730,6 @@ class TSC_ImageOverlay:
         return (base_image,)
 
 ########################################################################################################################
-# TSC Evaluate Integers (https://github.com/danthedeckie/simpleeval)
-class TSC_EvaluateInts:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {
-                    "python_expression": ("STRING", {"default": "((a + b) - c) / 2", "multiline": False}),
-                    "print_to_console": (["False", "True"],),},
-                "optional": {
-                    "a": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 1}),
-                    "b": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 1}),
-                    "c": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 1}),},
-                }
-    RETURN_TYPES = ("INT", "FLOAT", "STRING",)
-    OUTPUT_NODE = True
-    FUNCTION = "evaluate"
-    CATEGORY = "Efficiency Nodes/Simple Eval"
-
-    def evaluate(self, python_expression, print_to_console, a=0, b=0, c=0):
-        # simple_eval doesn't require the result to be converted to a string
-        result = simpleeval.simple_eval(python_expression, names={'a': a, 'b': b, 'c': c})
-        int_result = int(result)
-        float_result = float(result)
-        string_result = str(result)
-        if print_to_console == "True":
-            print("\n\033[31mEvaluate Integers:\033[0m")
-            print(f"\033[90m{{a = {a} , b = {b} , c = {c}}} \033[0m")
-            print(f"{python_expression} = \033[92m INT: " + str(int_result) + " , FLOAT: " + str(
-                float_result) + ", STRING: " + string_result + "\033[0m")
-        return (int_result, float_result, string_result,)
-
-#=======================================================================================================================
-# TSC Evaluate Floats (https://github.com/danthedeckie/simpleeval)
-class TSC_EvaluateFloats:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {
-                    "python_expression": ("STRING", {"default": "((a + b) - c) / 2", "multiline": False}),
-                    "print_to_console": (["False", "True"],),},
-                "optional": {
-                    "a": ("FLOAT", {"default": 0, "min": -sys.float_info.max, "max": sys.float_info.max, "step": 1}),
-                    "b": ("FLOAT", {"default": 0, "min": -sys.float_info.max, "max": sys.float_info.max, "step": 1}),
-                    "c": ("FLOAT", {"default": 0, "min": -sys.float_info.max, "max": sys.float_info.max, "step": 1}),},
-                }
-    RETURN_TYPES = ("INT", "FLOAT", "STRING",)
-    OUTPUT_NODE = True
-    FUNCTION = "evaluate"
-    CATEGORY = "Efficiency Nodes/Simple Eval"
-
-    def evaluate(self, python_expression, print_to_console, a=0, b=0, c=0):
-        # simple_eval doesn't require the result to be converted to a string
-        result = simpleeval.simple_eval(python_expression, names={'a': a, 'b': b, 'c': c})
-        int_result = int(result)
-        float_result = float(result)
-        string_result = str(result)
-        if print_to_console == "True":
-            print("\n\033[31mEvaluate Floats:\033[0m")
-            print(f"\033[90m{{a = {a} , b = {b} , c = {c}}} \033[0m")
-            print(f"{python_expression} = \033[92m INT: " + str(int_result) + " , FLOAT: " + str(
-                float_result) + ", STRING: " + string_result + "\033[0m")
-        return (int_result, float_result, string_result,)
-
-#=======================================================================================================================
-# TSC Evaluate Strings (https://github.com/danthedeckie/simpleeval)
-class TSC_EvaluateStrs:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {
-                    "python_expression": ("STRING", {"default": "a + b + c", "multiline": False}),
-                    "print_to_console": (["False", "True"],)},
-                "optional": {
-                    "a": ("STRING", {"default": "Hello", "multiline": False}),
-                    "b": ("STRING", {"default": " World", "multiline": False}),
-                    "c": ("STRING", {"default": "!", "multiline": False}),}
-                }
-    RETURN_TYPES = ("STRING",)
-    OUTPUT_NODE = True
-    FUNCTION = "evaluate"
-    CATEGORY = "Efficiency Nodes/Simple Eval"
-
-    def evaluate(self, python_expression, print_to_console, a="", b="", c=""):
-        variables = {'a': a, 'b': b, 'c': c}  # Define the variables for the expression
-        
-        functions = simpleeval.DEFAULT_FUNCTIONS.copy()
-        functions.update({"len": len}) # Add the functions for the expression
-        
-        result = simpleeval.simple_eval(python_expression, names=variables, functions=functions)
-        if print_to_console == "True":
-            print("\n\033[31mEvaluate Strings:\033[0m")
-            print(f"\033[90ma = {a} \nb = {b} \nc = {c}\033[0m")
-            print(f"{python_expression} = \033[92m" + str(result) + "\033[0m")
-        return (str(result),)  # Convert result to a string before returning
-
-#=======================================================================================================================
-# TSC Simple Eval Examples (https://github.com/danthedeckie/simpleeval)
-class TSC_EvalExamples:
-    @classmethod
-    def INPUT_TYPES(cls):
-        filepath = os.path.join(my_dir, 'workflows', 'SimpleEval_Node_Examples.txt')
-        with open(filepath, 'r') as file:
-            examples = file.read()
-        return {"required": { "models_text": ("STRING", {"default": examples ,"multiline": True}),},}
-    RETURN_TYPES = ()
-    CATEGORY = "Efficiency Nodes/Simple Eval"
-
-########################################################################################################################
 # NODE MAPPING
 NODE_CLASS_MAPPINGS = {
     "KSampler (Efficient)": TSC_KSampler,
@@ -2917,9 +2760,129 @@ NODE_CLASS_MAPPINGS = {
     "XY Input: Manual XY Entry": TSC_XYplot_Manual_XY_Entry,
     "Manual XY Entry Info": TSC_XYplot_Manual_XY_Entry_Info,
     "Join XY Inputs of Same Type": TSC_XYplot_JoinInputs,
-    "Image Overlay": TSC_ImageOverlay,
-    "Evaluate Integers": TSC_EvaluateInts,
-    "Evaluate Floats": TSC_EvaluateFloats,
-    "Evaluate Strings": TSC_EvaluateStrs,
-    "Simple Eval Examples": TSC_EvalExamples
+    "Image Overlay": TSC_ImageOverlay
 }
+########################################################################################################################
+# Simpleeval Nodes
+try:
+    import simpleeval
+
+    # TSC Evaluate Integers (https://github.com/danthedeckie/simpleeval)
+    class TSC_EvaluateInts:
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {"required": {
+                "python_expression": ("STRING", {"default": "((a + b) - c) / 2", "multiline": False}),
+                "print_to_console": (["False", "True"],), },
+                "optional": {
+                    "a": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 1}),
+                    "b": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 1}),
+                    "c": ("INT", {"default": 0, "min": -48000, "max": 48000, "step": 1}), },
+            }
+
+        RETURN_TYPES = ("INT", "FLOAT", "STRING",)
+        OUTPUT_NODE = True
+        FUNCTION = "evaluate"
+        CATEGORY = "Efficiency Nodes/Simple Eval"
+
+        def evaluate(self, python_expression, print_to_console, a=0, b=0, c=0):
+            # simple_eval doesn't require the result to be converted to a string
+            result = simpleeval.simple_eval(python_expression, names={'a': a, 'b': b, 'c': c})
+            int_result = int(result)
+            float_result = float(result)
+            string_result = str(result)
+            if print_to_console == "True":
+                print("\n\033[31mEvaluate Integers:\033[0m")
+                print(f"\033[90m{{a = {a} , b = {b} , c = {c}}} \033[0m")
+                print(f"{python_expression} = \033[92m INT: " + str(int_result) + " , FLOAT: " + str(
+                    float_result) + ", STRING: " + string_result + "\033[0m")
+            return (int_result, float_result, string_result,)
+
+
+    # ==================================================================================================================
+    # TSC Evaluate Floats (https://github.com/danthedeckie/simpleeval)
+    class TSC_EvaluateFloats:
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {"required": {
+                "python_expression": ("STRING", {"default": "((a + b) - c) / 2", "multiline": False}),
+                "print_to_console": (["False", "True"],), },
+                "optional": {
+                    "a": ("FLOAT", {"default": 0, "min": -sys.float_info.max, "max": sys.float_info.max, "step": 1}),
+                    "b": ("FLOAT", {"default": 0, "min": -sys.float_info.max, "max": sys.float_info.max, "step": 1}),
+                    "c": ("FLOAT", {"default": 0, "min": -sys.float_info.max, "max": sys.float_info.max, "step": 1}), },
+            }
+
+        RETURN_TYPES = ("INT", "FLOAT", "STRING",)
+        OUTPUT_NODE = True
+        FUNCTION = "evaluate"
+        CATEGORY = "Efficiency Nodes/Simple Eval"
+
+        def evaluate(self, python_expression, print_to_console, a=0, b=0, c=0):
+            # simple_eval doesn't require the result to be converted to a string
+            result = simpleeval.simple_eval(python_expression, names={'a': a, 'b': b, 'c': c})
+            int_result = int(result)
+            float_result = float(result)
+            string_result = str(result)
+            if print_to_console == "True":
+                print("\n\033[31mEvaluate Floats:\033[0m")
+                print(f"\033[90m{{a = {a} , b = {b} , c = {c}}} \033[0m")
+                print(f"{python_expression} = \033[92m INT: " + str(int_result) + " , FLOAT: " + str(
+                    float_result) + ", STRING: " + string_result + "\033[0m")
+            return (int_result, float_result, string_result,)
+
+
+    # ==================================================================================================================
+    # TSC Evaluate Strings (https://github.com/danthedeckie/simpleeval)
+    class TSC_EvaluateStrs:
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {"required": {
+                "python_expression": ("STRING", {"default": "a + b + c", "multiline": False}),
+                "print_to_console": (["False", "True"],)},
+                "optional": {
+                    "a": ("STRING", {"default": "Hello", "multiline": False}),
+                    "b": ("STRING", {"default": " World", "multiline": False}),
+                    "c": ("STRING", {"default": "!", "multiline": False}), }
+            }
+
+        RETURN_TYPES = ("STRING",)
+        OUTPUT_NODE = True
+        FUNCTION = "evaluate"
+        CATEGORY = "Efficiency Nodes/Simple Eval"
+
+        def evaluate(self, python_expression, print_to_console, a="", b="", c=""):
+            variables = {'a': a, 'b': b, 'c': c}  # Define the variables for the expression
+
+            functions = simpleeval.DEFAULT_FUNCTIONS.copy()
+            functions.update({"len": len})  # Add the functions for the expression
+
+            result = simpleeval.simple_eval(python_expression, names=variables, functions=functions)
+            if print_to_console == "True":
+                print("\n\033[31mEvaluate Strings:\033[0m")
+                print(f"\033[90ma = {a} \nb = {b} \nc = {c}\033[0m")
+                print(f"{python_expression} = \033[92m" + str(result) + "\033[0m")
+            return (str(result),)  # Convert result to a string before returning
+
+
+    # ==================================================================================================================
+    # TSC Simple Eval Examples (https://github.com/danthedeckie/simpleeval)
+    class TSC_EvalExamples:
+        @classmethod
+        def INPUT_TYPES(cls):
+            filepath = os.path.join(my_dir, 'workflows', 'SimpleEval_Node_Examples.txt')
+            with open(filepath, 'r') as file:
+                examples = file.read()
+            return {"required": {"models_text": ("STRING", {"default": examples, "multiline": True}), }, }
+
+        RETURN_TYPES = ()
+        CATEGORY = "Efficiency Nodes/Simple Eval"
+
+    # ==================================================================================================================
+    NODE_CLASS_MAPPINGS.update({"Evaluate Integers": TSC_EvaluateInts})
+    NODE_CLASS_MAPPINGS.update({"Evaluate Floats": TSC_EvaluateFloats})
+    NODE_CLASS_MAPPINGS.update({"Evaluate Strings": TSC_EvaluateStrs})
+    NODE_CLASS_MAPPINGS.update({"Simple Eval Examples": TSC_EvalExamples})
+
+except ImportError:
+    print(f"\r\033[33mEfficiency Nodes Warning:\033[0m Failed to import python package 'simpleeval'; related nodes disabled.\n")
