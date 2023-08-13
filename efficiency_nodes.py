@@ -458,7 +458,7 @@ class TSC_KSampler:
                 send_command_to_frontend(startListening=False)
 
             result = (model, positive, negative, {"samples": latent}, vae, output_images,)
-            return result if not preview_images else {"ui": {"images": preview_images}, "result": result}
+            return result if not preview_images and preview_method != "none" else {"ui": {"images": preview_images}, "result": result}
 
         # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
         # If the sampler state is "Hold"
