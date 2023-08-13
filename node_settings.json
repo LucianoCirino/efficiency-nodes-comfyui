@@ -6,16 +6,12 @@
             "lora": 1
         }
     },
-    "KSampler (Efficient)": {
-	"vae_tiled": false
-    },
     "XY Plot": {
         "model_cache": {
             "ckpt": 5,
             "vae": 5,
             "lora": 5
-        },
-	"vae_tiled": false
+        }
     }
 }
 
