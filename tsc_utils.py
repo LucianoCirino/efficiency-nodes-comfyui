@@ -24,11 +24,9 @@ sys.path.append(comfy_dir)
 
 # Import functions from ComfyUI
 import comfy.sd
-from comfy.cli_args import args
+import comfy.utils
 import latent_preview
-
-# Load my custom ComfyUI functions
-from tsc_sd import *
+from comfy.cli_args import args
 
 # Cache for Efficiency Node models
 loaded_objects = {
@@ -180,7 +178,7 @@ def load_checkpoint(ckpt_name, id, output_vae=True, cache=None, cache_overwrite=
 
     ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
     with suppress_output():
-        out = load_checkpoint_guess_config(ckpt_path, output_vae, output_clip=True,
+        out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae, output_clip=True,
                                            embedding_directory=folder_paths.get_folder_paths("embeddings"))
     model = out[0]
     clip = out[1]
@@ -307,7 +305,7 @@ def load_lora(lora_params, ckpt_name, id, cache=None, ckpt_cache=None, cache_ove
 
         lora_name, strength_model, strength_clip = lora_params[0]
         lora_path = folder_paths.get_full_path("loras", lora_name)
-        lora_model, lora_clip = load_lora_for_models_tsc(ckpt, clip, lora_path, strength_model, strength_clip)
+        lora_model, lora_clip = comfy.sd.load_lora_for_models(ckpt, clip, comfy.utils.load_torch_file(lora_path), strength_model, strength_clip)
 
         # Call the function again with the new lora_model and lora_clip and the remaining tuples
         return recursive_load_lora(lora_params[1:], lora_model, lora_clip, id, ckpt_cache, cache_overwrite, folder_paths)
