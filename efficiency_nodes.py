@@ -927,7 +927,7 @@ class TSC_KSampler:
                         capsule_result = xy_capsule.get_result(model, clip, vae)
                         if capsule_result is not None:
                             image, latent = capsule_result
-                            latent_list.append(latent)
+                            latent_list.append(latent['samples'])
 
                     if capsule_result is None:
                         if preview_method != "none":
@@ -950,6 +950,9 @@ class TSC_KSampler:
 
                         # Decode the latent tensor
                         image = vae_decode_latent(latent, vae_decode)
+
+                        if xy_capsule is not None:
+                            xy_capsule.set_result(image, latent)
 
                     # Add the resulting image tensor to image_tensor_list
                     image_tensor_list.append(image)
@@ -985,8 +988,13 @@ class TSC_KSampler:
                 # Change the global preview method temporarily during this node's execution
                 set_preview_method(preview_method)
 
+                original_model = model.clone()
+                original_clip = clip.clone()
+
                 # Fill Plot Rows (X)
                 for X_index, X in enumerate(X_value):
+                    model = original_model.clone()
+                    clip = original_clip.clone()
 
                     # Seed control based on loop index during Batch
                     if X_type == "Seeds++ Batch":
@@ -1001,24 +1009,34 @@ class TSC_KSampler:
                                         return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name,
                                         ckpt_name, clip_skip, positive_prompt, negative_prompt, lora_stack, cnet_stack, X_label, len(X_value))
 
+
                     if X_type != "Nothing" and Y_type == "Nothing":
+                        if X_type == "XY_Capsule":
+                            model, clip, vae = X.pre_define_model(model, clip, vae)
 
                         # Models & Conditionings
                         model, positive, negative , vae = \
                             define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip[0], vae,
                                          vae_name, ckpt_name, lora_stack, cnet_stack, 0, types, script_node_id, cache)
 
+                        xy_capsule = None
+                        if X_type == "XY_Capsule":
+                            xy_capsule = X
+
                         # Generate Results
                         latent_list, image_tensor_list, image_pil_list = \
                             process_values(model, add_noise, seed_updated, steps, start_at_step, end_at_step,
                                            return_with_leftover_noise, cfg, sampler_name, scheduler[0],
-                                           positive, negative, latent_image, denoise, vae, vae_decode, ksampler_adv_flag)
+                                           positive, negative, latent_image, denoise, vae, vae_decode, ksampler_adv_flag, xy_capsule=xy_capsule)
 
                     elif X_type != "Nothing" and Y_type != "Nothing":
                         # Seed control based on loop index during Batch
                         for Y_index, Y in enumerate(Y_value):
+                            model = original_model.clone()
+                            clip = original_clip.clone()
+
                             if Y_type == "XY_Capsule" and X_type == "XY_Capsule":
-                                Y.set_another_capsule(X)
+                                Y.set_x_capsule(X)
 
                             if Y_type == "Seeds++ Batch":
                                 # Update seed based on the inner loop index
@@ -1034,6 +1052,8 @@ class TSC_KSampler:
 
                             if Y_type == "XY_Capsule":
                                 model, clip, vae = Y.pre_define_model(model, clip, vae)
+                            elif X_type == "XY_Capsule":
+                                model, clip, vae = X.pre_define_model(model, clip, vae)
 
                             # Models & Conditionings
                             model, positive, negative, vae = \
@@ -1048,7 +1068,7 @@ class TSC_KSampler:
                             latent_list, image_tensor_list, image_pil_list = \
                                 process_values(model, add_noise, seed_updated, steps, start_at_step, end_at_step,
                                                return_with_leftover_noise, cfg, sampler_name, scheduler[0],
-                                               positive, negative, latent_image, denoise, vae, vae_decode, ksampler_adv_flag, xy_capsule)
+                                               positive, negative, latent_image, denoise, vae, vae_decode, ksampler_adv_flag, xy_capsule=xy_capsule)
 
                 # Clean up cache
                 if cache_models == "False":
@@ -1547,7 +1567,7 @@ class TSC_XYplot:
             Y_value = [""]
 
         # If types are the same exit. If one isn't "Nothing", print error
-        if (X_type == Y_type):
+        if X_type != "XY_Capsule" and (X_type == Y_type):
             if X_type != "Nothing":
                 print(f"\033[31mXY Plot Error:\033[0m X and Y input types must be different.")
             return (None,)
