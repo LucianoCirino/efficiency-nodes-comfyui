@@ -828,6 +828,9 @@ class TSC_KSampler:
                         cnet_stack = var
                         text = f'ControlNetStr: {round(cnet_stack[0][2], 3)}'
 
+                    elif var_type == "XY_Capsule":
+                        text = var.getLabel()
+
                     else: # No matching type found
                         text=""
 
@@ -917,28 +920,36 @@ class TSC_KSampler:
                 # The below function is used to generate the results based on all the processed variables
                 def process_values(model, add_noise, seed, steps, start_at_step, end_at_step, return_with_leftover_noise,
                                    cfg, sampler_name, scheduler, positive, negative, latent_image, denoise, vae, vae_decode,
-                                   ksampler_adv_flag, latent_list=[], image_tensor_list=[], image_pil_list=[]):
+                                   ksampler_adv_flag, latent_list=[], image_tensor_list=[], image_pil_list=[], xy_capsule=None):
 
-                    if preview_method != "none":
-                        send_command_to_frontend(startListening=True, maxCount=steps - 1, sendBlob=False)
+                    capsule_result = None
+                    if xy_capsule is not None:
+                        capsule_result = xy_capsule.get_result(model, clip, vae)
+                        if capsule_result is not None:
+                            image, latent = capsule_result
+                            latent_list.append(latent)
 
-                    # Sample using the Comfy KSampler nodes
-                    if ksampler_adv_flag == False:
-                        samples = KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler,
-                                                    positive, negative, latent_image, denoise=denoise)
-                    else:
-                        samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler,
-                                                            positive, negative, latent_image, start_at_step, end_at_step,
-                                                            return_with_leftover_noise, denoise=1.0)
+                    if capsule_result is None:
+                        if preview_method != "none":
+                            send_command_to_frontend(startListening=True, maxCount=steps - 1, sendBlob=False)
 
-                    # Decode images and store
-                    latent = samples[0]["samples"]
+                        # Sample using the Comfy KSampler nodes
+                        if ksampler_adv_flag == False:
+                            samples = KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler,
+                                                        positive, negative, latent_image, denoise=denoise)
+                        else:
+                            samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler,
+                                                                positive, negative, latent_image, start_at_step, end_at_step,
+                                                                return_with_leftover_noise, denoise=1.0)
 
-                    # Add the latent tensor to the tensors list
-                    latent_list.append(latent)
+                        # Decode images and store
+                        latent = samples[0]["samples"]
 
-                    # Decode the latent tensor
-                    image = vae_decode_latent(latent, vae_decode)
+                        # Add the latent tensor to the tensors list
+                        latent_list.append(latent)
+
+                        # Decode the latent tensor
+                        image = vae_decode_latent(latent, vae_decode)
 
                     # Add the resulting image tensor to image_tensor_list
                     image_tensor_list.append(image)
@@ -1006,6 +1017,8 @@ class TSC_KSampler:
                     elif X_type != "Nothing" and Y_type != "Nothing":
                         # Seed control based on loop index during Batch
                         for Y_index, Y in enumerate(Y_value):
+                            if Y_type == "XY_Capsule" and X_type == "XY_Capsule":
+                                Y.set_another_capsule(X)
 
                             if Y_type == "Seeds++ Batch":
                                 # Update seed based on the inner loop index
@@ -1019,16 +1032,23 @@ class TSC_KSampler:
                                                 return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
                                                 clip_skip, positive_prompt, negative_prompt, lora_stack, cnet_stack, Y_label, len(Y_value))
 
+                            if Y_type == "XY_Capsule":
+                                model, clip, vae = Y.pre_define_model(model, clip, vae)
+
                             # Models & Conditionings
                             model, positive, negative, vae = \
                                 define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip[0], vae,
                                          vae_name, ckpt_name, lora_stack, cnet_stack, Y_index, types, script_node_id, cache)
 
                             # Generate Results
+                            xy_capsule = None
+                            if Y_type == "XY_Capsule":
+                                xy_capsule = Y
+
                             latent_list, image_tensor_list, image_pil_list = \
                                 process_values(model, add_noise, seed_updated, steps, start_at_step, end_at_step,
                                                return_with_leftover_noise, cfg, sampler_name, scheduler[0],
-                                               positive, negative, latent_image, denoise, vae, vae_decode, ksampler_adv_flag)
+                                               positive, negative, latent_image, denoise, vae, vae_decode, ksampler_adv_flag, xy_capsule)
 
                 # Clean up cache
                 if cache_models == "False":
