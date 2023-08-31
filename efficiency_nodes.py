@@ -3930,13 +3930,13 @@ NODE_CLASS_MAPPINGS = {
 
 ########################################################################################################################
 # HirRes Fix Script with model latent upscaler (https://github.com/city96/SD-Latent-Upscaler)
-comfy_latent_upscaler = None
-sd_latent_upscaler_path = os.path.join(custom_nodes_dir, "SD-Latent-Upscaler")
-if os.path.exists(sd_latent_upscaler_path):
+city96_latent_upscaler = None
+city96_latent_upscaler_path = os.path.join(custom_nodes_dir, "SD-Latent-Upscaler")
+if os.path.exists(city96_latent_upscaler_path):
     printout = "Adding City96's 'SD-Latent-Upscaler' selections to the 'HighRes-Fix' node..."
     print(f"{message('Efficiency Nodes:')} {printout}", end="")
     try:
-        comfy_latent_upscaler = import_module("SD-Latent-Upscaler.comfy_latent_upscaler")
+        city96_latent_upscaler = import_module("SD-Latent-Upscaler.comfy_latent_upscaler")
         print(f"\r{message('Efficiency Nodes:')} {printout}{success('Success!')}")
     except ImportError:
         print(f"\r{message('Efficiency Nodes:')} {printout}{error('Failed!')}")
@@ -3947,9 +3947,9 @@ class TSC_HighRes_Fix:
     default_upscale_methods = LatentUpscaleBy.INPUT_TYPES()["required"]["upscale_method"][0]
     city96_upscale_methods = list()
 
-    if comfy_latent_upscaler:
-        city96_upscale_methods = ["SD-Latent-Upscaler." + ver for ver in comfy_latent_upscaler.LatentUpscaler.INPUT_TYPES()["required"]["latent_ver"][0]]
-        city96_scalings_raw = comfy_latent_upscaler.LatentUpscaler.INPUT_TYPES()["required"]["scale_factor"][0]
+    if city96_latent_upscaler:
+        city96_upscale_methods = ["SD-Latent-Upscaler." + ver for ver in city96_latent_upscaler.LatentUpscaler.INPUT_TYPES()["required"]["latent_ver"][0]]
+        city96_scalings_raw = city96_latent_upscaler.LatentUpscaler.INPUT_TYPES()["required"]["scale_factor"][0]
         city96_scalings_float = [float(scale) for scale in city96_scalings_raw]
     upscale_methods = default_upscale_methods + city96_upscale_methods
 
@@ -3982,8 +3982,8 @@ class TSC_HighRes_Fix:
                 # Remove extra characters added
                 latent_upscale_method = latent_upscale_method.replace("SD-Latent-Upscaler.", "")
 
-                # Set function to comfy_latent_upscaler.LatentUpscaler.upscale()
-                upscale_function = comfy_latent_upscaler.LatentUpscaler
+                # Set function to city96_latent_upscaler.LatentUpscaler
+                upscale_function = city96_latent_upscaler.LatentUpscaler
 
                 # Find the nearest valid scaling in city96_scalings_float
                 nearest_scaling = min(self.city96_scalings_float, key=lambda x: abs(x - upscale_by))
