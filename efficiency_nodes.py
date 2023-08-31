@@ -1406,32 +1406,30 @@ class TSC_KSampler:
                                sampler_type, latent_list=[], image_tensor_list=[], image_pil_list=[], xy_capsule=None):
 
                 capsule_result = None
-                    if xy_capsule is not None:
-                        capsule_result = xy_capsule.get_result(model, clip, vae)
-                        if capsule_result is not None:
-                            image, latent = capsule_result
-                            latent_list.append(latent['samples'])
+                if xy_capsule is not None:
+                    capsule_result = xy_capsule.get_result(model, clip, vae)
+                    if capsule_result is not None:
+                        image, latent = capsule_result
+                        latent_list.append(latent['samples'])
 
-                    if capsule_result is None:
-                        if preview_method != "none":
-                            send_command_to_frontend(startListening=True, maxCount=steps - 1, sendBlob=False)
+                if capsule_result is None:
+                    if preview_method != "none":
+                        send_command_to_frontend(startListening=True, maxCount=steps - 1, sendBlob=False)
 
+                    samples = sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
+                                                  latent_image, denoise, sampler_type, add_noise, start_at_step,
+                                                  end_at_step,
+                                                  return_with_leftover_noise, refiner_model, refiner_positive,
+                                                  refiner_negative)
 
-                            samples = sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler,
-                                                        positive, negative, latent_image, denoise, sampler_type, add_noise,  start_at_step, end_at_step,
-                                                                return_with_leftover_noise, refiner_model, refiner_positive, refiner_negative)
+                    # Add the latent tensor to the tensors list
+                    latent_list.append(samples)
 
-                        # Add the latent tensor to the tensors list
-                        latent_list.append(samples)
+                    # Decode the latent tensor
+                    image = vae_decode_latent(vae, samples, vae_decode)
 
-                        # Decode the latent tensor
-                        image = vae_decode_latent(vae, samples, vae_decode)
-
-                        if xy_capsule is not None:
-                            xy_capsule.set_result(image, latent)
-
-                    # Add the resulting image tensor to image_tensor_list
-                    image_tensor_list.append(image)
+                # Add the resulting image tensor to image_tensor_list
+                image_tensor_list.append(image)
 
                 # Convert the image from tensor to PIL Image and add it to the image_pil_list
                 image_pil_list.append(tensor2pil(image))
@@ -1463,12 +1461,12 @@ class TSC_KSampler:
             set_preview_method(preview_method)
 
             original_model = model.clone()
-                original_clip = clip.clone()
+            original_clip = clip.clone()
 
-                # Fill Plot Rows (X)
-                for X_index, X in enumerate(X_value):
-                    model = original_model.clone()
-                    clip = original_clip.clone()
+            # Fill Plot Rows (X)
+            for X_index, X in enumerate(X_value):
+                model = original_model.clone()
+                clip = original_clip.clone()
 
                 # Define X parameters and generate labels
                 add_noise, seed, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
@@ -1481,9 +1479,9 @@ class TSC_KSampler:
                                     negative_prompt, ascore, lora_stack, cnet_stack, X_label, len(X_value))
 
 
-                    if X_type != "Nothing" and Y_type == "Nothing":
-                        if X_type == "XY_Capsule":
-                            model, clip, vae = X.pre_define_model(model, clip, vae)
+                if X_type != "Nothing" and Y_type == "Nothing":
+                    if X_type == "XY_Capsule":
+                        model, clip, vae = X.pre_define_model(model, clip, vae)
 
                     # Models & Conditionings
                     model, positive, negative, refiner_model, refiner_positive, refiner_negative, vae = \
@@ -1505,11 +1503,11 @@ class TSC_KSampler:
                 elif X_type != "Nothing" and Y_type != "Nothing":
                     # Seed control based on loop index during Batch
                     for Y_index, Y in enumerate(Y_value):
-                            model = original_model.clone()
-                            clip = original_clip.clone()
+                        model = original_model.clone()
+                        clip = original_clip.clone()
 
-                            if Y_type == "XY_Capsule" and X_type == "XY_Capsule":
-                                Y.set_x_capsule(X)
+                        if Y_type == "XY_Capsule" and X_type == "XY_Capsule":
+                            Y.set_x_capsule(X)
 
                         # Define Y parameters and generate labels
                         add_noise, seed, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
@@ -1522,12 +1520,12 @@ class TSC_KSampler:
                                             negative_prompt, ascore, lora_stack, cnet_stack, Y_label, len(Y_value))
 
                         if Y_type == "XY_Capsule":
-                                model, clip, vae = Y.pre_define_model(model, clip, vae)
-                            elif X_type == "XY_Capsule":
-                                model, clip, vae = X.pre_define_model(model, clip, vae)
+                            model, clip, vae = Y.pre_define_model(model, clip, vae)
+                        elif X_type == "XY_Capsule":
+                            model, clip, vae = X.pre_define_model(model, clip, vae)
 
-                            # Models & Conditionings
-                            model, positive, negative, refiner_model, refiner_positive, refiner_negative, vae = \
+                        # Models & Conditionings
+                        model, positive, negative, refiner_model, refiner_positive, refiner_negative, vae = \
                             define_model(model, clip, clip_skip[0], refiner_model, refiner_clip, refiner_clip_skip[0],
                                          ckpt_name, refiner_name, positive, negative, refiner_positive, refiner_negative,
                                          positive_prompt[0], negative_prompt[0], ascore, vae, vae_name, lora_stack, cnet_stack[0],
