@@ -311,8 +311,8 @@ class TSC_LoRA_Stacker:
             loras = [(lora_name, lora_weight, lora_weight) for lora_name, lora_weight in zip(loras, weights) if
                      lora_name != "None"]
         else:
-            model_strs = [kwargs.get(f"model_str_{i}", model_strength) for i in range(1, lora_count + 1)]
-            clip_strs = [kwargs.get(f"clip_str_{i}", clip_strength) for i in range(1, lora_count + 1)]
+            model_strs = [kwargs.get(f"model_str_{i}") for i in range(1, lora_count + 1)]
+            clip_strs = [kwargs.get(f"clip_str_{i}") for i in range(1, lora_count + 1)]
             loras = [(lora_name, model_str, clip_str) for lora_name, model_str, clip_str in
                      zip(loras, model_strs, clip_strs) if lora_name != "None"]
 
