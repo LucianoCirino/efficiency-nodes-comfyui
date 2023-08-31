@@ -38,7 +38,7 @@ Efficiency Nodes for ComfyUI
 - Node that allows users to specify parameters for the Efficient KSampler's to plot on a grid.
 
 <p align="center">
-  <img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/X-Seeds%20Y-Checkpoints%20(1verview).png?raw=true" width="320">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/X-Seeds%20Y-Checkpoints%20(Overview).png?raw=true" width="320">
 </p>
 
 </details>
