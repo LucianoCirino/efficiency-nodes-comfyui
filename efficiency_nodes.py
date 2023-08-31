@@ -1410,7 +1410,7 @@ class TSC_KSampler:
                     capsule_result = xy_capsule.get_result(model, clip, vae)
                     if capsule_result is not None:
                         image, latent = capsule_result
-                        latent_list.append(latent['samples'])
+                        latent_list.append(latent)
 
                 if capsule_result is None:
                     if preview_method != "none":
@@ -1427,6 +1427,9 @@ class TSC_KSampler:
 
                     # Decode the latent tensor
                     image = vae_decode_latent(vae, samples, vae_decode)
+
+                    if xy_capsule is not None:
+                        xy_capsule.set_result(image, samples)
 
                 # Add the resulting image tensor to image_tensor_list
                 image_tensor_list.append(image)
