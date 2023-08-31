@@ -1,16 +1,18 @@
 {
     "Efficient Loader": {
         "model_cache": {
-            "ckpt": 1,
             "vae": 1,
-            "lora": 1
+            "ckpt": 1,
+            "lora": 1,
+            "refn": 1
         }
     },
     "XY Plot": {
         "model_cache": {
-            "ckpt": 5,
             "vae": 5,
-            "lora": 5
+            "ckpt": 5,
+            "lora": 5,
+            "refn": 1
         }
     }
 }

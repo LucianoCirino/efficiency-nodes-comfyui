@@ -1,7 +1,6 @@
 # Efficiency Nodes - A collection of my ComfyUI custom nodes to help streamline workflows and reduce total node count.
-#  by Luciano Cirino (Discord: TSC#9184) - April 2023
-
-from nodes import KSampler, KSamplerAdvanced, CLIPSetLastLayer, CLIPTextEncode, ControlNetApply
+# by Luciano Cirino (Discord: TSC#9184) - April 2023 - August 2023
+# https://github.com/LucianoCirino/efficiency-nodes-comfyui
 
 from torch import Tensor
 from PIL import Image, ImageOps, ImageDraw, ImageFont
@@ -11,38 +10,82 @@ import torch
 
 import ast
 from pathlib import Path
+from importlib import import_module
 import os
 import sys
+import copy
 import subprocess
 import json
-import folder_paths
 import psutil
 
-# Get the absolute path of the parent directory of the current script
+# Get the absolute path of various directories
 my_dir = os.path.dirname(os.path.abspath(__file__))
-
-# Add the My directory path to the sys.path list
-sys.path.append(my_dir)
-
-# Construct the absolute path to the ComfyUI directory
+custom_nodes_dir = os.path.abspath(os.path.join(my_dir, '..'))
 comfy_dir = os.path.abspath(os.path.join(my_dir, '..', '..'))
-
-# Add the ComfyUI directory path to the sys.path list
-sys.path.append(comfy_dir)
 
 # Construct the path to the font file
 font_path = os.path.join(my_dir, 'arial.ttf')
 
-# Import ComfyUI files
+# Append comfy_dir to sys.path & import files
+sys.path.append(comfy_dir)
+from nodes import LatentUpscaleBy, KSampler, KSamplerAdvanced, VAEDecode, VAEDecodeTiled, CLIPSetLastLayer, CLIPTextEncode, ControlNetApplyAdvanced
+from comfy_extras.nodes_clip_sdxl import CLIPTextEncodeSDXL, CLIPTextEncodeSDXLRefiner
 import comfy.samplers
 import comfy.sd
 import comfy.utils
 import comfy.latent_formats
+sys.path.remove(comfy_dir)
 
-# Import my utility functions
+# Append my_dir to sys.path & import files
+sys.path.append(my_dir)
 from tsc_utils import *
+sys.path.remove(my_dir)
 
+# Append custom_nodes_dir to sys.path
+sys.path.append(custom_nodes_dir)
+
+# GLOBALS
 MAX_RESOLUTION=8192
+REFINER_CFG_OFFSET = 0 #Refiner CFG Offset
+
+########################################################################################################################
+# Common function for encoding prompts
+def encode_prompts(positive_prompt, negative_prompt, clip, clip_skip, refiner_clip, refiner_clip_skip, ascore, is_sdxl,
+                   empty_latent_width, empty_latent_height, return_type="both"):
+
+    positive_encoded = negative_encoded = refiner_positive_encoded = refiner_negative_encoded = None
+
+    # Process base encodings if needed
+    if return_type in ["base", "both"]:
+        # Base clip skip
+        clip = CLIPSetLastLayer().set_last_layer(clip, clip_skip)[0]
+        if not is_sdxl:
+            positive_encoded = CLIPTextEncode().encode(clip, positive_prompt)[0]
+            negative_encoded = CLIPTextEncode().encode(clip, negative_prompt)[0]
+        else:
+            # Encode prompt for base
+            positive_encoded = CLIPTextEncodeSDXL().encode(clip, empty_latent_width, empty_latent_height, 0, 0,
+                                                           empty_latent_width, empty_latent_height, positive_prompt,
+                                                           positive_prompt)[0]
+            negative_encoded = CLIPTextEncodeSDXL().encode(clip, empty_latent_width, empty_latent_height, 0, 0,
+                                                           empty_latent_width, empty_latent_height, negative_prompt,
+                                                           negative_prompt)[0]
+    # Process refiner encodings if needed
+    if return_type in ["refiner", "both"] and is_sdxl and refiner_clip and refiner_clip_skip and ascore:
+        # Refiner clip skip
+        refiner_clip = CLIPSetLastLayer().set_last_layer(refiner_clip, refiner_clip_skip)[0]
+        # Encode prompt for refiner
+        refiner_positive_encoded = CLIPTextEncodeSDXLRefiner().encode(refiner_clip, ascore[0], empty_latent_width,
+                                                                      empty_latent_height, positive_prompt)[0]
+        refiner_negative_encoded = CLIPTextEncodeSDXLRefiner().encode(refiner_clip, ascore[1], empty_latent_width,
+                                                                      empty_latent_height, negative_prompt)[0]
+    # Return results based on return_type
+    if return_type == "base":
+        return positive_encoded, negative_encoded
+    elif return_type == "refiner":
+        return refiner_positive_encoded, refiner_negative_encoded
+    elif return_type == "both":
+        return positive_encoded, negative_encoded, refiner_positive_encoded, refiner_negative_encoded
 
 ########################################################################################################################
 # TSC Efficient Loader
@@ -74,16 +117,17 @@ class TSC_EfficientLoader:
 
     def efficientloader(self, ckpt_name, vae_name, clip_skip, lora_name, lora_model_strength, lora_clip_strength,
                         positive, negative, empty_latent_width, empty_latent_height, batch_size, lora_stack=None,
-                        cnet_stack=None, prompt=None, my_unique_id=None):
-
-        # Create Empty Latent
-        latent = torch.zeros([batch_size, 4, empty_latent_height // 8, empty_latent_width // 8]).cpu()
+                        cnet_stack=None, refiner_name="None", ascore=None, prompt=None, my_unique_id=None,
+                        loader_type="regular"):
 
         # Clean globally stored objects
         globals_cleanup(prompt)
 
+        # Create Empty Latent
+        latent = torch.zeros([batch_size, 4, empty_latent_height // 8, empty_latent_width // 8]).cpu()
+
         # Retrieve cache numbers
-        vae_cache, ckpt_cache, lora_cache = get_cache_numbers("Efficient Loader")
+        vae_cache, ckpt_cache, lora_cache, refn_cache = get_cache_numbers("Efficient Loader")
 
         if lora_name != "None" or lora_stack:
             # Initialize an empty list to store LoRa parameters.
@@ -106,100 +150,171 @@ class TSC_EfficientLoader:
             model, clip, vae = load_checkpoint(ckpt_name, my_unique_id, cache=ckpt_cache, cache_overwrite=True)
             lora_params = None
 
+        # Load Refiner Checkpoint if given
+        if refiner_name != "None":
+            refiner_model, refiner_clip, _ = load_checkpoint(refiner_name, my_unique_id, output_vae=False,
+                                                             cache=refn_cache, cache_overwrite=True, ckpt_type="refn")
+        else:
+            refiner_model = refiner_clip = None
+
+        # Extract clip_skips
+        refiner_clip_skip = clip_skip[1] if loader_type == "sdxl" else None
+        clip_skip = clip_skip[0] if loader_type == "sdxl" else clip_skip
+
+        # Encode prompt based on loader_type
+        positive_encoded, negative_encoded, refiner_positive_encoded, refiner_negative_encoded = \
+            encode_prompts(positive, negative, clip, clip_skip, refiner_clip, refiner_clip_skip, ascore,
+                           loader_type == "sdxl", empty_latent_width, empty_latent_height)
+        
+        # Apply ControlNet Stack if given
+        if cnet_stack:
+            positive_encoded = TSC_Apply_ControlNet_Stack().apply_cnet_stack(positive_encoded,cnet_stack)[0]
+
         # Check for custom VAE
         if vae_name != "Baked VAE":
             vae = load_vae(vae_name, my_unique_id, cache=vae_cache, cache_overwrite=True)
-
-        # Debugging
-        ###print_loaded_objects_entries()
-
-        # CLIP skip
-        clip = CLIPSetLastLayer().set_last_layer(clip, clip_skip)[0]
-
-        # Encode Conditionings
-        positive_encoded = CLIPTextEncode().encode(clip, positive)[0]
-        negative_encoded = CLIPTextEncode().encode(clip, negative)[0]
-
-        # Recursively apply Control Net to the positive encoding for each entry in the stack
-        if cnet_stack is not None:
-            for control_net_tuple in cnet_stack:
-                control_net, image, strength = control_net_tuple
-                positive_encoded = ControlNetApply().apply_controlnet(positive_encoded, control_net, image, strength)[0]
-
+            
         # Data for XY Plot
-        dependencies = (vae_name, ckpt_name, clip, clip_skip, positive, negative, lora_params, cnet_stack)
+        dependencies = (vae_name, ckpt_name, clip, clip_skip, refiner_name, refiner_clip, refiner_clip_skip,
+                        positive, negative, ascore, empty_latent_width, empty_latent_height, lora_params, cnet_stack)
 
-        return (model, positive_encoded, negative_encoded, {"samples":latent}, vae, clip, dependencies, )
+        ### Debugging
+        ###print_loaded_objects_entries()
+        print_loaded_objects_entries(my_unique_id, prompt)
+        
+        if loader_type == "regular":
+            return (model, positive_encoded, negative_encoded, {"samples":latent}, vae, clip, dependencies,)
+        elif loader_type == "sdxl":
+            return ((model, clip, positive_encoded, negative_encoded, refiner_model, refiner_clip,
+                     refiner_positive_encoded, refiner_negative_encoded), {"samples":latent}, vae, dependencies,)
+
+#=======================================================================================================================
+# TSC Efficient Loader SDXL
+class TSC_EfficientLoaderSDXL(TSC_EfficientLoader):
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": { "base_ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
+                              "base_clip_skip": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
+                              "refiner_ckpt_name": (["None"] + folder_paths.get_filename_list("checkpoints"),),
+                              "refiner_clip_skip": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
+                              "positive_ascore": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
+                              "negative_ascore": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
+                              "vae_name": (["Baked VAE"] + folder_paths.get_filename_list("vae"),),
+                              "positive": ("STRING", {"default": "Positive","multiline": True}),
+                              "negative": ("STRING", {"default": "Negative", "multiline": True}),
+                              "empty_latent_width": ("INT", {"default": 1024, "min": 64, "max": MAX_RESOLUTION, "step": 128}),
+                              "empty_latent_height": ("INT", {"default": 1024, "min": 64, "max": MAX_RESOLUTION, "step": 128}),
+                              "batch_size": ("INT", {"default": 1, "min": 1, "max": 64})},
+                "optional": {"lora_stack": ("LORA_STACK", ), "cnet_stack": ("CONTROL_NET_STACK",),},
+                "hidden": { "prompt": "PROMPT", "my_unique_id": "UNIQUE_ID",},
+                }
+
+    RETURN_TYPES = ("SDXL_TUPLE", "LATENT", "VAE", "DEPENDENCIES",)
+    RETURN_NAMES = ("SDXL_TUPLE", "LATENT", "VAE", "DEPENDENCIES", )
+    FUNCTION = "efficientloaderSDXL"
+    CATEGORY = "Efficiency Nodes/Loaders"
+
+    def efficientloaderSDXL(self, base_ckpt_name, base_clip_skip, refiner_ckpt_name, refiner_clip_skip, positive_ascore,
+                            negative_ascore, vae_name, positive, negative, empty_latent_width, empty_latent_height,
+                            batch_size, lora_stack=None, cnet_stack=None, prompt=None, my_unique_id=None):
+        clip_skip = (base_clip_skip, refiner_clip_skip)
+        lora_name = "None"
+        lora_model_strength = lora_clip_strength = 0
+        return super().efficientloader(base_ckpt_name, vae_name, clip_skip, lora_name, lora_model_strength, lora_clip_strength,
+                        positive, negative, empty_latent_width, empty_latent_height, batch_size, lora_stack=lora_stack,
+                        cnet_stack=cnet_stack, refiner_name=refiner_ckpt_name, ascore=(positive_ascore, negative_ascore),
+                        prompt=prompt, my_unique_id=my_unique_id, loader_type="sdxl")
+
+#=======================================================================================================================
+# TSC Unpack SDXL Tuple
+class TSC_Unpack_SDXL_Tuple:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"sdxl_tuple": ("SDXL_TUPLE",)},}
+
+    RETURN_TYPES = ("MODEL", "CLIP", "MODEL", "CLIP", "CONDITIONING","CONDITIONING", "CONDITIONING", "CONDITIONING",)
+    RETURN_NAMES = ("BASE_MODEL", "BASE_CLIP", "REFINER_MODEL", "REFINER_CLIP",
+                    "BASE_CONDITIONING+", "BASE_CONDITIONING-","REFINER_CONDITIONING+","REFINER_CONDITIONING-",)
+    FUNCTION = "unpack_sdxl_tuple"
+    CATEGORY = "Efficiency Nodes/Misc"
+
+    def unpack_sdxl_tuple(self, sdxl_tuple):
+        return (sdxl_tuple[0], sdxl_tuple[1],sdxl_tuple[2],sdxl_tuple[3],
+                sdxl_tuple[4],sdxl_tuple[5],sdxl_tuple[6],sdxl_tuple[7],)
+
+# =======================================================================================================================
+# TSC Pack SDXL Tuple
+class TSC_Pack_SDXL_Tuple:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"base_model": ("MODEL",),
+                             "base_clip": ("CLIP",),
+                             "base_positive": ("CONDITIONING",),
+                             "base_negative": ("CONDITIONING",),
+                             "refiner_model": ("MODEL",),
+                             "refiner_clip": ("CLIP",),
+                             "refiner_positive": ("CONDITIONING",),
+                             "refiner_negative": ("CONDITIONING",),},}
+
+    RETURN_TYPES = ("SDXL_TUPLE",)
+    RETURN_NAMES = ("SDXL_TUPLE",)
+    FUNCTION = "pack_sdxl_tuple"
+    CATEGORY = "Efficiency Nodes/Misc"
+
+    def pack_sdxl_tuple(self, base_model, base_clip, base_positive, base_negative,
+                        refiner_model, refiner_clip, refiner_positive, refiner_negative):
+        return ((base_model, base_clip, base_positive, base_negative,
+                 refiner_model, refiner_clip, refiner_positive, refiner_negative),)
 
 ########################################################################################################################
 # TSC LoRA Stacker
 class TSC_LoRA_Stacker:
+    modes = ["simple", "advanced"]
 
     @classmethod
     def INPUT_TYPES(cls):
         loras = ["None"] + folder_paths.get_filename_list("loras")
-        return {"required": {
-            "lora_name_1": (loras,),
-            "lora_wt_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "lora_name_2": (loras,),
-            "lora_wt_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "lora_name_3": (loras,),
-            "lora_wt_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})},
-            "optional": {"lora_stack": ("LORA_STACK",)},
+        inputs = {
+            "required": {
+                "input_mode": (cls.modes,),
+                "lora_count": ("INT", {"default": 3, "min": 0, "max": 50, "step": 1}),
+            }
         }
+
+        for i in range(1, 50):
+            inputs["required"][f"lora_name_{i}"] = (loras,)
+            inputs["required"][f"lora_wt_{i}"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})
+            inputs["required"][f"model_str_{i}"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})
+            inputs["required"][f"clip_str_{i}"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})
+
+        inputs["optional"] = {
+            "lora_stack": ("LORA_STACK",)
+        }
+        return inputs
 
     RETURN_TYPES = ("LORA_STACK",)
     RETURN_NAMES = ("LORA_STACK",)
     FUNCTION = "lora_stacker"
-    CATEGORY = "Efficiency Nodes/Misc"
+    CATEGORY = "Efficiency Nodes/Stackers"
 
-    def lora_stacker(self, lora_name_1, lora_wt_1, lora_name_2, lora_wt_2, lora_name_3, lora_wt_3, lora_stack=None):
+    def lora_stacker(self, input_mode, lora_count, lora_stack=None, **kwargs):
+
+        # Extract values from kwargs
+        loras = [kwargs.get(f"lora_name_{i}") for i in range(1, lora_count + 1)]
+
         # Create a list of tuples using provided parameters, exclude tuples with lora_name as "None"
-        loras = [(lora_name, lora_wt, lora_wt) for lora_name, lora_wt, lora_wt in
-                 [(lora_name_1, lora_wt_1, lora_wt_1),
-                  (lora_name_2, lora_wt_2, lora_wt_2),
-                  (lora_name_3, lora_wt_3, lora_wt_3)]
-                 if lora_name != "None"]
-
-        # If lora_stack is not None, extend the loras list with lora_stack
-        if lora_stack is not None:
-            loras.extend([l for l in lora_stack if l[0] != "None"])
-
-        return (loras,)
-
-#=======================================================================================================================
-# TSC LoRA Stacker Advanced
-class TSC_LoRA_Stacker_Adv:
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        loras = ["None"] + folder_paths.get_filename_list("loras")
-        return {"required": {
-            "lora_name_1": (loras,),
-            "model_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "clip_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "lora_name_2": (loras,),
-            "model_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "clip_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "lora_name_3": (loras,),
-            "model_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            "clip_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})},
-            "optional": {"lora_stack": ("LORA_STACK",)},
-        }
-
-    RETURN_TYPES = ("LORA_STACK",)
-    RETURN_NAMES = ("LORA_STACK",)
-    FUNCTION = "lora_stacker"
-    CATEGORY = "Efficiency Nodes/Misc"
-
-    def lora_stacker(self, lora_name_1, model_str_1, clip_str_1, lora_name_2, model_str_2, clip_str_2,
-                     lora_name_3, model_str_3, clip_str_3, lora_stack=None):
-        # Create a list of tuples using provided parameters, exclude tuples with lora_name as "None"
-        loras = [(lora_name, model_str, clip_str) for lora_name, model_str, clip_str in
-                 [(lora_name_1, model_str_1, clip_str_1),
-                  (lora_name_2, model_str_2, clip_str_2),
-                  (lora_name_3, model_str_3, clip_str_3)]
-                 if lora_name != "None"]
+        if input_mode == "simple":
+            weights = [kwargs.get(f"lora_wt_{i}") for i in range(1, lora_count + 1)]
+            loras = [(lora_name, lora_weight, lora_weight) for lora_name, lora_weight in zip(loras, weights) if
+                     lora_name != "None"]
+        else:
+            model_strs = [kwargs.get(f"model_str_{i}", model_strength) for i in range(1, lora_count + 1)]
+            clip_strs = [kwargs.get(f"clip_str_{i}", clip_strength) for i in range(1, lora_count + 1)]
+            loras = [(lora_name, model_str, clip_str) for lora_name, model_str, clip_str in
+                     zip(loras, model_strs, clip_strs) if lora_name != "None"]
 
         # If lora_stack is not None, extend the loras list with lora_stack
         if lora_stack is not None:
@@ -214,25 +329,49 @@ class TSC_Control_Net_Stacker:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {"control_net": ("CONTROL_NET",),
-                         "image": ("IMAGE",),
-                         "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01})},
+                             "image": ("IMAGE",),
+                             "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01}),
+                             "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+                             "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001})},
                 "optional": {"cnet_stack": ("CONTROL_NET_STACK",)},
                 }
 
     RETURN_TYPES = ("CONTROL_NET_STACK",)
     RETURN_NAMES = ("CNET_STACK",)
     FUNCTION = "control_net_stacker"
-    CATEGORY = "Efficiency Nodes/Misc"
+    CATEGORY = "Efficiency Nodes/Stackers"
 
-    def control_net_stacker(self, control_net, image, strength, cnet_stack=None):
+    def control_net_stacker(self, control_net, image, strength, start_percent, end_percent, cnet_stack=None):
         # If control_net_stack is None, initialize as an empty list
-        if cnet_stack is None:
-            cnet_stack = []
+        cnet_stack = [] if cnet_stack is None else cnet_stack
 
         # Extend the control_net_stack with the new tuple
-        cnet_stack.extend([(control_net, image, strength)])
+        cnet_stack.extend([(control_net, image, strength, start_percent, end_percent)])
 
         return (cnet_stack,)
+
+#=======================================================================================================================
+# TSC Apply ControlNet Stack
+class TSC_Apply_ControlNet_Stack:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"conditioning": ("CONDITIONING",),
+                            "cnet_stack": ("CONTROL_NET_STACK",)},
+                }
+
+    RETURN_TYPES = ("CONDITIONING",)
+    RETURN_NAMES = ("CONDITIONING",)
+    FUNCTION = "apply_cnet_stack"
+    CATEGORY = "Efficiency Nodes/Stackers"
+
+    def apply_cnet_stack(self, conditioning, cnet_stack):
+        for control_net_tuple in cnet_stack:
+            control_net, image, strength, start_percent, end_percent = control_net_tuple
+            conditioning_new = ControlNetApplyAdvanced().apply_controlnet(conditioning, conditioning,
+                                                                          control_net, image, strength,
+                                                                          start_percent, end_percent)[0]
+        return (conditioning_new,)
 
 ########################################################################################################################
 # TSC KSampler (Efficient)
@@ -275,23 +414,38 @@ class TSC_KSampler:
     def sample(self, sampler_state, model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
                latent_image, preview_method, vae_decode, denoise=1.0, prompt=None, extra_pnginfo=None, my_unique_id=None,
                optional_vae=(None,), script=None, add_noise=None, start_at_step=None, end_at_step=None,
-               return_with_leftover_noise=None):
+               return_with_leftover_noise=None, sampler_type="regular"):
 
         # Rename the vae variable
         vae = optional_vae
 
-        # Find instance of ksampler type
-        if add_noise == None:
-            ksampler_adv_flag = False
-        else:
-            ksampler_adv_flag = True
-            
         # If vae is not connected, disable vae decoding
         if vae == (None,) and vae_decode != "false":
-            print('\033[33mKSampler(Efficient) Warning:\033[0m No vae input detected, proceeding as if vae_decode was false.\n')
+            print(f"{warning('KSampler(Efficient) Warning:')} No vae input detected, proceeding as if vae_decode was false.\n")
             vae_decode = "false"
 
-        # Functions for previewing images in Ksampler
+        #---------------------------------------------------------------------------------------------------------------
+        # Unpack SDXL Tuple embedded in the 'model' channel
+        if sampler_type == "sdxl":
+            sdxl_tuple = model
+            model, _, positive, negative, refiner_model, _, refiner_positive, refiner_negative = sdxl_tuple
+        else:
+            refiner_model = refiner_positive = refiner_negative = None
+
+        #---------------------------------------------------------------------------------------------------------------
+        def keys_exist_in_script(*keys):
+            return any(key in script for key in keys) if script else False
+
+        # If no valid script input connected, error out
+        if not keys_exist_in_script("xyplot", "hiresfix", "tile") and sampler_state == "Script":
+            print(f"{error('KSampler(Efficient) Error:')} No valid script input detected")
+            if sampler_type == "sdxl":
+                result = (sdxl_tuple, latent_image, vae, TSC_KSampler.empty_image,)
+            else:
+                result = (model, positive, negative, latent_image, vae, TSC_KSampler.empty_image,)
+            return {"ui": {"images": list()}, "result": result}
+
+        #---------------------------------------------------------------------------------------------------------------
         def map_filename(filename):
             prefix_len = len(os.path.basename(filename_prefix))
             prefix = filename[:prefix_len + 1]
@@ -350,6 +504,7 @@ class TSC_KSampler:
                 counter += 1
             return results
 
+        #---------------------------------------------------------------------------------------------------------------
         def get_value_by_id(key: str, my_unique_id):
             global last_helds
             for value, id_ in last_helds[key]:
@@ -368,14 +523,83 @@ class TSC_KSampler:
             last_helds[key].append((new_value, my_unique_id))
             return True
 
-        def vae_decode_latent(latent, vae_decode):
-            return vae.decode_tiled(latent).cpu() if "tiled" in vae_decode else vae.decode(latent).cpu()
+        #---------------------------------------------------------------------------------------------------------------
+        def vae_decode_latent(vae, samples, vae_decode):
+            return VAEDecodeTiled.decode_tiled(vae,samples)[0] if "tiled" in vae_decode else VAEDecode().decode(vae,samples)[0]
 
+        # ---------------------------------------------------------------------------------------------------------------
+        def sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
+                                denoise, sampler_type, add_noise, start_at_step, end_at_step, return_with_leftover_noise,
+                                refiner_model=None, refiner_positive=None, refiner_negative=None):
+
+            if keys_exist_in_script("tile"):
+                tile_width, tile_height, tiling_strategy, blenderneko_tiled_nodes = script["tile"]
+                TSampler = blenderneko_tiled_nodes.TiledKSampler
+                TSamplerAdvanced = blenderneko_tiled_nodes.TiledKSamplerAdvanced
+
+            # Sample the latent_image(s) using the Comfy KSampler nodes
+            if sampler_type == "regular":
+                if keys_exist_in_script("tile"):
+                    samples = TSampler().sample(model, seed, tile_width, tile_height, tiling_strategy, steps, cfg,
+                                                sampler_name, scheduler, positive, negative,
+                                                latent_image, denoise=denoise)[0]
+                else:
+                    samples = KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
+                                                latent_image, denoise=denoise)[0]
+
+            elif sampler_type == "advanced":
+                if keys_exist_in_script("tile"):
+                    samples = TSamplerAdvanced().sample(model, add_noise, seed, tile_width, tile_height, tiling_strategy,
+                                                        steps, cfg, sampler_name, scheduler,
+                                                        positive, negative, latent_image, start_at_step, end_at_step,
+                                                        return_with_leftover_noise, "disabled", denoise=1.0)[0]
+                else:
+                    samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler,
+                                                        positive, negative, latent_image, start_at_step, end_at_step,
+                                                        return_with_leftover_noise, denoise=1.0)[0]
+
+            elif sampler_type == "sdxl":
+                # Disable refiner if refine_at_step is -1
+                if end_at_step == -1:
+                    end_at_step = steps
+
+                # Perform base model sampling
+                add_noise = return_with_leftover_noise = True
+                samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler,
+                                                    positive, negative, latent_image, start_at_step, end_at_step,
+                                                    return_with_leftover_noise, denoise=1.0)[0]
+
+                # Perform refiner model sampling
+                if refiner_model and end_at_step < steps:
+                    add_noise = return_with_leftover_noise = False
+                    samples = KSamplerAdvanced().sample(refiner_model, add_noise, seed, steps, cfg + REFINER_CFG_OFFSET,
+                                                        sampler_name, scheduler, refiner_positive, refiner_negative,
+                                                        samples, end_at_step, steps,
+                                                        return_with_leftover_noise, denoise=1.0)[0]
+
+            # Check if "hiresfix" exists in the script after main sampling has taken place
+            if keys_exist_in_script("hiresfix"):
+
+                # Unpack the tuple from the script's "hiresfix" key
+                latent_upscale_method, upscale_by, hires_steps, hires_denoise, iterations, upscale_function = script["hiresfix"]
+
+                # Iterate for the given number of iterations
+                for _ in range(iterations):
+                    upscaled_latent_image = upscale_function().upscale(samples, latent_upscale_method, upscale_by)[0]
+                    # Use the regular KSampler for each iteration
+                    if False: #if keys_exist_in_script("tile"):  # Disabled for HiResFix
+                        samples = TSampler().sample(model, seed, tile_width, tile_height, tiling_strategy, steps, cfg,
+                                                    sampler_name, scheduler,
+                                                    positive, negative, upscaled_latent_image, denoise=hires_denoise)[0]
+                    else:
+                        samples = KSampler().sample(model, seed, hires_steps, cfg, sampler_name, scheduler,
+                                                    positive, negative, upscaled_latent_image, denoise=hires_denoise)[0]
+
+            return samples
+
+        # ---------------------------------------------------------------------------------------------------------------
         # Clean globally stored objects of non-existant nodes
         globals_cleanup(prompt)
-
-        # Convert ID string to an integer
-        my_unique_id = int(my_unique_id)
 
         # Init last_preview_images
         if get_value_by_id("preview_images", my_unique_id) is None:
@@ -388,7 +612,7 @@ class TSC_KSampler:
             last_latent = latent_image
         else:
             last_latent = {"samples": None}
-            last_latent["samples"] = get_value_by_id("latent", my_unique_id)
+            last_latent = get_value_by_id("latent", my_unique_id)
 
         # Init last_output_images
         if get_value_by_id("output_images", my_unique_id) == None:
@@ -397,11 +621,11 @@ class TSC_KSampler:
             last_output_images = get_value_by_id("output_images", my_unique_id)
 
         # Define filename_prefix
-        filename_prefix = "KSeff_{:02d}".format(my_unique_id)
+        filename_prefix = "KSeff_{}".format(my_unique_id)
 
         # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-        # Check the current sampler state
-        if sampler_state == "Sample":
+        # If the sampler state is "Sample" or "Script" without XY Plot
+        if sampler_state == "Sample" or (sampler_state == "Script" and not keys_exist_in_script("xyplot")):
 
             # Store the global preview method
             previous_preview_method = global_preview_method()
@@ -413,18 +637,12 @@ class TSC_KSampler:
             if preview_method != "none" and "true" in vae_decode:
                 send_command_to_frontend(startListening=True, maxCount=steps-1, sendBlob=False)
 
-            # Sample the latent_image(s) using the Comfy KSampler nodes
-            if ksampler_adv_flag == False:
-                samples = KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
-            else:
-                samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-                                latent_image, start_at_step, end_at_step, return_with_leftover_noise, denoise=1.0)
+            samples = sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
+                                            latent_image, denoise, sampler_type, add_noise, start_at_step, end_at_step,
+                                            return_with_leftover_noise, refiner_model, refiner_positive, refiner_negative)
 
-            # Extract the latent samples from the returned samples dictionary
-            latent = samples[0]["samples"]
-
-            # Cache latent samples in the 'last_helds' dictionary "latent"
-            update_value_by_id("latent", my_unique_id, latent)
+            # Cache samples in the 'last_helds' dictionary "latent"
+            update_value_by_id("latent", my_unique_id, samples)
 
             # Define node output images & next Hold's vae_decode behavior
             output_images = node_images = get_latest_image() ###
@@ -434,7 +652,7 @@ class TSC_KSampler:
                     output_images = TSC_KSampler.empty_image
             else:
                 update_value_by_id("vae_decode_flag", my_unique_id, False)
-                decoded_image = vae_decode_latent(latent, vae_decode)
+                decoded_image = vae_decode_latent(vae, samples, vae_decode)
                 output_images = node_images = decoded_image
 
             # Cache output images to global 'last_helds' dictionary "output_images"
@@ -457,7 +675,10 @@ class TSC_KSampler:
                 # Send message to front-end to revoke the last blob image from browser's memory (fixes preview duplication bug)
                 send_command_to_frontend(startListening=False)
 
-            result = (model, positive, negative, {"samples": latent}, vae, output_images,)
+            if sampler_type == "sdxl":
+                result = (sdxl_tuple, samples, vae, output_images,)
+            else:
+                result = (model, positive, negative, samples, vae, output_images,)
             return result if not preview_images and preview_method != "none" else {"ui": {"images": preview_images}, "result": result}
 
         # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -468,7 +689,7 @@ class TSC_KSampler:
 
             if get_value_by_id("vae_decode_flag", my_unique_id):
                 if "true" in vae_decode or "output only" in vae_decode:
-                    output_images = node_images = vae_decode_latent(last_latent["samples"], vae_decode)
+                    output_images = node_images = vae_decode_latent(vae, last_latent, vae_decode)
                     update_value_by_id("vae_decode_flag", my_unique_id, False)
                     update_value_by_id("output_images", my_unique_id, output_images)
                     preview_images = preview_image(node_images, filename_prefix)
@@ -478,11 +699,10 @@ class TSC_KSampler:
 
             # Check if holding an XY Plot image
             elif get_value_by_id("xy_plot_flag", my_unique_id):
-                # Extract the name of the node connected to script input
-                script_node_name, _ = extract_node_info(prompt, my_unique_id, 'script')
-                if script_node_name == "XY Plot":
+                # Check if XY Plot node is connected
+                if keys_exist_in_script("xyplot"):
                     # Extract the 'xyplot_as_output_image' input parameter from the connected xy_plot
-                    _, _, _, _, _, _, _, xyplot_as_output_image, _ = script
+                    _, _, _, _, _, _, _, xyplot_as_output_image, _, _ = script["xyplot"]
                     if xyplot_as_output_image == True:
                         output_images = get_value_by_id("xy_plot_image", my_unique_id)
                     else:
@@ -492,320 +712,505 @@ class TSC_KSampler:
                     output_images = last_output_images
                     preview_images = last_preview_images if "true" in vae_decode else list()
 
-            return {"ui": {"images": preview_images},
-                    "result": (model, positive, negative, {"samples": last_latent["samples"]}, vae, output_images,)}
+            if sampler_type == "sdxl":
+                result = (sdxl_tuple, last_latent, vae, output_images,)
+            else:
+                result = (model, positive, negative, last_latent, vae, output_images,)
+            return {"ui": {"images": preview_images}, "result": result}
 
         # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-        elif sampler_state == "Script":
-
-            # Store name of connected node to script input
-            script_node_name, script_node_id = extract_node_info(prompt, my_unique_id, 'script')
-
-            # If no valid script input connected, error out
-            if script == None or script == (None,) or script_node_name!="XY Plot":
-                if script_node_name!="XY Plot":
-                    print('\033[31mKSampler(Efficient) Error:\033[0m No valid script input detected')
-                return {"ui": {"images": list()},
-                        "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
+        # If the sampler state is "Script" with XY Plot
+        elif sampler_state == "Script" and keys_exist_in_script("xyplot"):
 
             # If no vae connected, throw errors
             if vae == (None,):
-                print('\033[31mKSampler(Efficient) Error:\033[0m VAE input must be connected in order to use the XY Plotter.')
+                print(f"{error('KSampler(Efficient) Error:')} VAE input must be connected in order to use the XY Plot script.")
                 return {"ui": {"images": list()},
                         "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
 
             # If vae_decode is not set to true, print message that changing it to true
             if "true" not in vae_decode:
-                print('\033[33mKSampler(Efficient) Warning:\033[0m VAE decoding must be set to \'true\''
-                    ' for XY Plot script, proceeding as if \'true\'.\n')
-
-            # Extract the 'samples' tensor and split it into individual image tensors
-            image_tensors = torch.split(latent_image['samples'], 1, dim=0)
-
-            # Get the shape of the first image tensor
-            shape = image_tensors[0].shape
-
-            # Extract the original height and width
-            latent_height, latent_width = shape[2] * 8, shape[3] * 8
-
-            # Set latent only to the first latent of batch
-            latent_image = {'samples': image_tensors[0]}
+                print(f"{warning('KSampler(Efficient) Warning:')} VAE decoding must be set to \'true\'"
+                    " for the XY Plot script, proceeding as if \'true\'.\n")
 
             #___________________________________________________________________________________________________________
             # Initialize, unpack, and clean variables for the XY Plot script
-            if script_node_name == "XY Plot":
+            vae_name = None
+            ckpt_name = None
+            clip = None
+            clip_skip = None
+            refiner_name = None
+            refiner_clip = None
+            refiner_clip_skip = None
+            positive_prompt = None
+            negative_prompt = None
+            ascore = None
+            empty_latent_width = None
+            empty_latent_height = None
+            lora_stack = None
+            cnet_stack = None
 
-                # Initialize variables
-                vae_name = None
-                ckpt_name = None
-                clip = None
-                clip_skip = None
-                positive_prompt = None
-                negative_prompt = None
-                lora_stack = None
-                cnet_stack = None
+            # Split the 'samples' tensor
+            samples_tensors = torch.split(latent_image['samples'], 1, dim=0)
 
-                # Unpack script Tuple (X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, dependencies)
-                X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models, xyplot_as_output_image, dependencies = script
+            # Check if 'noise_mask' exists and split if it does
+            if 'noise_mask' in latent_image:
+                noise_mask_tensors = torch.split(latent_image['noise_mask'], 1, dim=0)
+                latent_tensors = [{'samples': img, 'noise_mask': mask} for img, mask in
+                                  zip(samples_tensors, noise_mask_tensors)]
+            else:
+                latent_tensors = [{'samples': img} for img in samples_tensors]
 
-                #_______________________________________________________________________________________________________
-                # The below section is used to check wether the XY_type is allowed for the Ksampler instance being used.
-                # If not the correct type, this section will abort the xy plot script.
+            # Set latent only to the first of the batch
+            latent_image = latent_tensors[0]
+
+            # Unpack script Tuple (X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, dependencies)
+            X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models, xyplot_as_output_image,\
+                xyplot_id, dependencies = script["xyplot"]
+
+            #_______________________________________________________________________________________________________
+            # The below section is used to check wether the XY_type is allowed for the Ksampler instance being used.
+            # If not the correct type, this section will abort the xy plot script.
+
+            samplers = {
+                "regular": {
+                    "disallowed": ["AddNoise", "ReturnNoise", "StartStep", "EndStep", "RefineStep",
+                                   "Refiner", "Refiner On/Off", "AScore+", "AScore-"],
+                    "name": "KSampler (Efficient)"
+                },
+                "advanced": {
+                    "disallowed": ["RefineStep", "Denoise", "RefineStep", "Refiner", "Refiner On/Off",
+                                   "AScore+", "AScore-"],
+                    "name": "KSampler Adv. (Efficient)"
+                },
+                "sdxl": {
+                    "disallowed": ["AddNoise", "EndStep", "Denoise"],
+                    "name": "KSampler SDXL (Eff.)"
+                }
+            }
+
+            # Define disallowed XY_types for each ksampler type
+            def get_ksampler_details(sampler_type):
+                return samplers.get(sampler_type, {"disallowed": [], "name": ""})
+
+            def suggest_ksampler(X_type, Y_type, current_sampler):
+                for sampler, details in samplers.items():
+                    if sampler != current_sampler and X_type not in details["disallowed"] and Y_type not in details["disallowed"]:
+                        return details["name"]
+                return "a different KSampler"
+
+            # In your main function or code segment:
+            details = get_ksampler_details(sampler_type)
+            disallowed_XY_types = details["disallowed"]
+            ksampler_name = details["name"]
+
+            if X_type in disallowed_XY_types or Y_type in disallowed_XY_types:
+                error_prefix = f"{error(f'{ksampler_name} Error:')}"
+
+                failed_type = []
+                if X_type in disallowed_XY_types:
+                    failed_type.append(f"X_type: '{X_type}'")
+                if Y_type in disallowed_XY_types:
+                    failed_type.append(f"Y_type: '{Y_type}'")
+
+                suggested_ksampler = suggest_ksampler(X_type, Y_type, sampler_type)
+
+                print(f"{error_prefix} Invalid value for {' and '.join(failed_type)}. "
+                    f"Use {suggested_ksampler} for this XY Plot type."
+                    f"\nDisallowed XY_types for this KSampler are: {', '.join(disallowed_XY_types)}.")
+
+                return {"ui": {"images": list()},
+                    "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
+
+            #_______________________________________________________________________________________________________
+            # Unpack Effficient Loader dependencies
+            if dependencies is not None:
+                vae_name, ckpt_name, clip, clip_skip, refiner_name, refiner_clip, refiner_clip_skip,\
+                    positive_prompt, negative_prompt, ascore, empty_latent_width, empty_latent_height,\
+                    lora_stack, cnet_stack = dependencies
+
+            #_______________________________________________________________________________________________________
+            # Printout XY Plot values to be processed
+            def process_xy_for_print(value, replacement, type_):
+
+                if type_ == "Seeds++ Batch" and isinstance(value, list):
+                    return [v + seed for v in value]  # Add seed to every entry in the list
+
+                elif type_ == "Scheduler" and isinstance(value, tuple):
+                    return value[0]  # Return only the first entry of the tuple
+
+                elif type_ == "VAE" and isinstance(value, list):
+                    # For each string in the list, extract the filename from the path
+                    return [os.path.basename(v) for v in value]
                 
-                # Define disallowed XY_types for each ksampler type
-                disallowed_ksampler_types = ["AddNoise", "ReturnNoise", "StartStep", "EndStep"]
-                disallowed_ksamplerAdv_types = ["Denoise"]
+                elif (type_ == "Checkpoint" or type_ == "Refiner") and isinstance(value, list):
+                    # For each tuple in the list, return only the first value if the second or third value is None
+                    return [(os.path.basename(v[0]),) + v[1:] if v[1] is None or v[2] is None
+                            else (os.path.basename(v[0]), v[1]) if v[2] is None
+                            else (os.path.basename(v[0]),) + v[1:] for v in value]
 
-                # Check against the relevant disallowed values array based on ksampler_adv_flag
-                current_disallowed_values = disallowed_ksamplerAdv_types if ksampler_adv_flag else disallowed_ksampler_types
+                elif type_ == "LoRA" and isinstance(value, list):
+                    # Return only the first Tuple of each inner array
+                    return [[(os.path.basename(v[0][0]),) + v[0][1:], "..."] if len(v) > 1
+                            else [(os.path.basename(v[0][0]),) + v[0][1:]] for v in value]
 
-                # Print error and exit
-                if X_type in current_disallowed_values or Y_type in current_disallowed_values:
-                    error_prefix = '\033[31mKSampler Adv.(Efficient) Error:\033[0m' \
-                        if ksampler_adv_flag else '\033[31mKSampler(Efficient) Error:\033[0m'
+                elif type_ == "LoRA Batch" and isinstance(value, list):
+                    # Extract the basename of the first value of the first tuple from each sublist
+                    return [os.path.basename(v[0][0]) for v in value if v and isinstance(v[0], tuple) and v[0][0]]
 
-                    # Determine which type failed
-                    failed_type = None
-                    if X_type in current_disallowed_values:
-                        failed_type = f"X_type: '{X_type}'"
-                    if Y_type in current_disallowed_values:
-                        if failed_type:
-                            failed_type += f" and Y_type: '{Y_type}'"
-                        else:
-                            failed_type = f"Y_type: '{Y_type}'"
+                elif (type_ == "LoRA Wt" or type_ == "LoRA MStr") and isinstance(value, list):
+                    # Extract the first value of the first tuple from each sublist
+                    return [v[0][1] for v in value if v and isinstance(v[0], tuple)]
 
-                    # Suggest alternative KSampler
-                    suggested_ksampler = "KSampler(Efficient)" if ksampler_adv_flag else "KSampler Adv.(Efficient)"
+                elif type_ == "LoRA CStr" and isinstance(value, list):
+                    # Extract the first value of the first tuple from each sublist
+                    return [v[0][2] for v in value if v and isinstance(v[0], tuple)]
 
-                    print(f"{error_prefix} Invalid value for {failed_type}. Use {suggested_ksampler} for this XY Plot type."
-                          f"\nDisallowed XY_types for this KSampler are: {', '.join(current_disallowed_values)}.")
+                elif type_ == "ControlNetStrength" and isinstance(value, list):
+                    # Extract the third entry of the first tuple from each inner list
+                    return [round(inner_list[0][2], 3) for inner_list in value]
 
-                    return {"ui": {"images": list()},
-                            "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
+                elif type_ == "ControlNetStart%" and isinstance(value, list):
+                    # Extract the third entry of the first tuple from each inner list
+                    return [round(inner_list[0][3], 3) for inner_list in value]
 
-                #_______________________________________________________________________________________________________
-                # Unpack Effficient Loader dependencies
-                if dependencies is not None:
-                    vae_name, ckpt_name, clip, clip_skip, positive_prompt, negative_prompt, lora_stack, cnet_stack = dependencies
+                elif type_ == "ControlNetEnd%" and isinstance(value, list):
+                    # Extract the third entry of the first tuple from each inner list
+                    return [round(inner_list[0][4], 3) for inner_list in value]
 
-                # Helper function to process printout values
-                def process_xy_for_print(value, replacement, type_):
-                    if isinstance(value, tuple) and type_ == "Scheduler":
-                        return value[0]  # Return only the first entry of the tuple
-                    elif type_ == "ControlNetStr" and isinstance(value, list):
-                        # Extract the first inner array of each entry and then get the third entry of its tuple
-                        return [round(inner_list[0][2], 3) for inner_list in value if
-                                inner_list and isinstance(inner_list[0], tuple) and len(inner_list[0]) == 3]
-                    elif isinstance(value, tuple):
-                        return tuple(replacement if v is None else v for v in value)
+                elif isinstance(value, tuple):
+                    return tuple(replacement if v is None else v for v in value)
+
+                else:
+                    return replacement if value is None else value
+
+            # Determine the replacements based on X_type and Y_type
+            replacement_X = scheduler if X_type == 'Sampler' else clip_skip if X_type == 'Checkpoint' else None
+            replacement_Y = scheduler if Y_type == 'Sampler' else clip_skip if Y_type == 'Checkpoint' else None
+
+            # Process X_value and Y_value
+            X_value_processed = process_xy_for_print(X_value, replacement_X, X_type)
+            Y_value_processed = process_xy_for_print(Y_value, replacement_Y, Y_type)
+
+            print(info("-" * 40))
+            print(info('XY Plot Script Inputs:'))
+            print(info(f"(X) {X_type}:"))
+            for item in X_value_processed:
+                print(info(f"    {item}"))
+            print(info(f"(Y) {Y_type}:"))
+            for item in Y_value_processed:
+                print(info(f"    {item}"))
+            print(info("-" * 40))
+
+            #_______________________________________________________________________________________________________
+            # Perform various initializations in this section
+
+            # If not caching models, set to 1.
+            if cache_models == "False":
+                vae_cache = ckpt_cache = lora_cache = refn_cache = 1
+            else:
+                # Retrieve cache numbers
+                vae_cache, ckpt_cache, lora_cache, refn_cache = get_cache_numbers("XY Plot")
+            # Pack cache numbers in a tuple
+            cache = (vae_cache, ckpt_cache, lora_cache, refn_cache)
+
+            # Add seed to every entry in the list
+            X_value = [v + seed for v in X_value] if "Seeds++ Batch" == X_type else X_value
+            Y_value = [v + seed for v in Y_value] if "Seeds++ Batch" == Y_type else Y_value
+
+            # Embedd original prompts into prompt variables
+            positive_prompt = (positive_prompt, positive_prompt)
+            negative_prompt = (negative_prompt, negative_prompt)
+
+            # Set lora_stack to None if one of types are LoRA
+            if "LoRA" in X_type or "LoRA" in Y_type:
+                lora_stack = None
+
+            # Define the manipulated and static Control Net Variables with a tuple with shape (cn_1, cn_2, cn_3).
+            # The information in this tuple will be used by the plotter to properly plot Control Net XY input types.
+            cn_1, cn_2, cn_3 = None, None, None
+            # If X_type has "ControlNet" or both X_type and Y_type have "ControlNet"
+            if "ControlNet" in X_type:
+                cn_1, cn_2, cn_3 = X_value[0][0][2], X_value[0][0][3], X_value[0][0][4]
+            # If only Y_type has "ControlNet" and not X_type
+            elif "ControlNet" in Y_type:
+                cn_1, cn_2, cn_3 = Y_value[0][0][2], Y_value[0][0][3], Y_value[0][0][4]
+            # Additional checks for other substrings
+            if "ControlNetStrength" in X_type or "ControlNetStrength" in Y_type:
+                cn_1 = None
+            if "ControlNetStart%" in X_type or "ControlNetStart%" in Y_type:
+                cn_2 = None
+            if "ControlNetEnd%" in X_type or "ControlNetEnd%" in Y_type:
+                cn_3 = None
+            # Embed the information in cnet_stack
+            cnet_stack = (cnet_stack, (cn_1, cn_2, cn_3))
+
+            # Optimize image generation by prioritization:
+            priority = [
+                "Checkpoint",
+                "Refiner",
+                "LoRA",
+                "VAE",
+            ]
+            conditioners = {
+                "Positive Prompt S/R",
+                "Negative Prompt S/R",
+                "AScore+",
+                "AScore-",
+                "Clip Skip",
+                "Clip Skip (Refiner)",
+                "ControlNetStrength",
+                "ControlNetStart%",
+                "ControlNetEnd%"
+            }
+            # Get priority values; return a high number if the type is not in priority list
+            x_priority = priority.index(X_type) if X_type in priority else 999
+            y_priority = priority.index(Y_type) if Y_type in priority else 999
+
+            # Check if both are conditioners
+            are_both_conditioners = X_type in conditioners and Y_type in conditioners
+
+            # Special cases
+            is_special_case = (
+                    (X_type == "Refiner On/Off" and Y_type in ["RefineStep", "Steps"]) or
+                    (X_type == "Nothing" and Y_type != "Nothing")
+            )
+
+            # Determine whether to flip
+            flip_xy = (y_priority < x_priority and not are_both_conditioners) or is_special_case
+
+            # Perform the flip if necessary
+            if flip_xy:
+                X_type, Y_type = Y_type, X_type
+                X_value, Y_value = Y_value, X_value
+
+            #_______________________________________________________________________________________________________
+            # The below code will clean from the cache any ckpt/vae/lora models it will not be reusing.
+            # Note: Special LoRA types will not trigger cache: "LoRA Batch", "LoRA Wt", "LoRA MStr", "LoRA CStr"
+
+            # Map the type names to the dictionaries
+            dict_map = {"VAE": [], "Checkpoint": [], "LoRA": [], "Refiner": []}
+
+            # Create a list of tuples with types and values
+            type_value_pairs = [(X_type, X_value.copy()), (Y_type, Y_value.copy())]
+
+            # Iterate over type-value pairs
+            for t, v in type_value_pairs:
+                if t in dict_map:
+                    # Flatten the list of lists of tuples if the type is "LoRA"
+                    if t == "LoRA":
+                        dict_map[t] = [item for sublist in v for item in sublist]
                     else:
-                        return replacement if value is None else value
+                        dict_map[t] = v
 
-                # Determine the replacements based on X_type and Y_type
-                replacement_X = scheduler if X_type == 'Sampler' else clip_skip if X_type == 'Checkpoint' else None
-                replacement_Y = scheduler if Y_type == 'Sampler' else clip_skip if Y_type == 'Checkpoint' else None
+            vae_dict = dict_map.get("VAE", [])
 
-                # Process X_value and Y_value
-                X_value_processed = process_xy_for_print(X_value, replacement_X, X_type)
-                Y_value_processed = process_xy_for_print(Y_value, replacement_Y, Y_type)
+            # Construct ckpt_dict and also update vae_dict based on the third entry of the tuples in dict_map["Checkpoint"]
+            if dict_map.get("Checkpoint", []):
+                ckpt_dict = [t[0] for t in dict_map["Checkpoint"]]
+                for t in dict_map["Checkpoint"]:
+                    if t[2] is not None and t[2] != "Baked VAE":
+                        vae_dict.append(t[2])
+            else:
+                ckpt_dict = []
 
-                # Print XY Plot Inputs
-                print("-" * 40)
-                print("XY Plot Script Inputs:")
-                print(f"(X) {X_type}: {X_value_processed}")
-                print(f"(Y) {Y_type}: {Y_value_processed}")
-                print("-" * 40)
+            lora_dict = [[t,] for t in dict_map.get("LoRA", [])] if dict_map.get("LoRA", []) else []
 
-                # If not caching models, set to 1.
-                if cache_models == "False":
-                    vae_cache = ckpt_cache = lora_cache = 1
-                else:
-                    # Retrieve cache numbers
-                    vae_cache, ckpt_cache, lora_cache = get_cache_numbers("XY Plot")
-                # Pack cache numbers in a tuple
-                cache = (vae_cache, ckpt_cache, lora_cache)
+            # Construct refn_dict
+            if dict_map.get("Refiner", []):
+                refn_dict = [t[0] for t in dict_map["Refiner"]]
+            else:
+                refn_dict = []
 
-                # Embedd original prompts into prompt variables
-                positive_prompt = (positive_prompt, positive_prompt)
-                negative_prompt = (negative_prompt, negative_prompt)
+            # If both ckpt_dict and lora_dict are not empty, manipulate lora_dict as described
+            if ckpt_dict and lora_dict:
+                lora_dict = [(lora_stack, ckpt) for ckpt in ckpt_dict for lora_stack in lora_dict]
+            # If lora_dict is not empty and ckpt_dict is empty, insert ckpt_name into each tuple in lora_dict
+            elif lora_dict:
+                lora_dict = [(lora_stack, ckpt_name) for lora_stack in lora_dict]
 
-                # Optimize image generation by prioritizing Checkpoint>LoRA>VAE>PromptSR as X in For Loop. Flip back when done.
-                if Y_type == "Checkpoint" or \
-                        Y_type == "LoRA" and X_type not in {"Checkpoint"} or \
-                        Y_type == "VAE" and X_type not in {"Checkpoint", "LoRA"} or \
-                        Y_type == "Positive Prompt S/R" and X_type not in {"Checkpoint", "LoRA", "VAE",
-                                                                           "Negative Prompt S/R"} or \
-                        Y_type == "Negative Prompt S/R" and X_type not in {"Checkpoint", "LoRA", "VAE",
-                                                                           "Positive Prompt S/R"} or \
-                        X_type == "Nothing" and Y_type != "Nothing":
-                    flip_xy = True
-                    X_type, Y_type = Y_type, X_type
-                    X_value, Y_value = Y_value, X_value
-                else:
-                    flip_xy = False
-                #_______________________________________________________________________________________________________
-                #The below code will clean from the cache any ckpt/vae/lora models it will not be reusing.
+            # Avoid caching models accross both X and Y
+            if X_type == "Checkpoint":
+                lora_dict = []
+                refn_dict = []
+            elif X_type == "Refiner":
+                ckpt_dict = []
+                lora_dict = []
+            elif X_type == "LoRA":
+                ckpt_dict = []
+                refn_dict = []
 
-                # Map the type names to the dictionaries
-                dict_map = {"VAE": [], "Checkpoint": [], "LoRA": []}
+            ### Print dict_arrays for debugging
+            ###print(f"vae_dict={vae_dict}\nckpt_dict={ckpt_dict}\nlora_dict={lora_dict}\nrefn_dict={refn_dict}")
 
-                # Create a list of tuples with types and values
-                type_value_pairs = [(X_type, X_value), (Y_type, Y_value)]
+            # Clean values that won't be reused
+            clear_cache_by_exception(xyplot_id, vae_dict=vae_dict, ckpt_dict=ckpt_dict, lora_dict=lora_dict, refn_dict=refn_dict)
 
-                # Iterate over type-value pairs
-                for t, v in type_value_pairs:
-                    if t in dict_map:
-                        # Flatten the list of lists of tuples if the type is "LoRA"
-                        if t == "LoRA":
-                            dict_map[t] = [item for sublist in v for item in sublist]
+            ### Print loaded_objects for debugging
+            ###print_loaded_objects_entries()
+
+            #_______________________________________________________________________________________________________
+            # Function that changes appropiate variables for next processed generations (also generates XY_labels)
+            def define_variable(var_type, var, add_noise, seed, steps, start_at_step, end_at_step,
+                                return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
+                                clip_skip, refiner_name, refiner_clip_skip, positive_prompt, negative_prompt, ascore,
+                                lora_stack, cnet_stack, var_label, num_label):
+
+                # Define default max label size limit
+                max_label_len = 36
+
+                # If var_type is "AddNoise", update 'add_noise' with 'var', and generate text label
+                if var_type == "AddNoise":
+                    add_noise = var
+                    text = f"AddNoise: {add_noise}"
+
+                # If var_type is "Seeds++ Batch", generate text label
+                elif var_type == "Seeds++ Batch":
+                    seed = var
+                    text = f"Seed: {seed}"
+
+                # If var_type is "Steps", update 'steps' with 'var' and generate text label
+                elif var_type == "Steps":
+                    steps = var
+                    text = f"Steps: {steps}"
+
+                # If var_type is "StartStep", update 'start_at_step' with 'var' and generate text label
+                elif var_type == "StartStep":
+                    start_at_step = var
+                    text = f"StartStep: {start_at_step}"
+
+                # If var_type is "EndStep", update 'end_at_step' with 'var' and generate text label
+                elif var_type == "EndStep":
+                    end_at_step = var
+                    text = f"EndStep: {end_at_step}"
+
+                # If var_type is "RefineStep", update 'end_at_step' with 'var' and generate text label
+                elif var_type == "RefineStep":
+                    end_at_step = var
+                    text = f"RefineStep: {end_at_step}"
+
+                # If var_type is "ReturnNoise", update 'return_with_leftover_noise' with 'var', and generate text label
+                elif var_type == "ReturnNoise":
+                    return_with_leftover_noise = var
+                    text = f"ReturnNoise: {return_with_leftover_noise}"
+
+                # If var_type is "CFG Scale", update cfg with var and generate text label
+                elif var_type == "CFG Scale":
+                    cfg = var
+                    text = f"CFG: {round(cfg,2)}"
+
+                # If var_type is "Sampler", update sampler_name and scheduler with var, and generate text label
+                elif var_type == "Sampler":
+                    sampler_name = var[0]
+                    if var[1] == "":
+                        text = f"{sampler_name}"
+                    else:
+                        if var[1] != None:
+                            scheduler = (var[1], scheduler[1])
                         else:
-                            dict_map[t] = v
+                            scheduler = (scheduler[1], scheduler[1])
+                        text = f"{sampler_name} ({scheduler[0]})"
+                    text = text.replace("ancestral", "a").replace("uniform", "u").replace("exponential","exp")
 
-                ckpt_dict = [t[0] for t in dict_map.get("Checkpoint", [])] if dict_map.get("Checkpoint", []) else []
+                # If var_type is "Scheduler", update scheduler and generate labels
+                elif var_type == "Scheduler":
+                    if len(var) == 2:
+                        scheduler = (var[0], scheduler[1])
+                        text = f"{sampler_name} ({scheduler[0]})"
+                    else:
+                        scheduler = (var, scheduler[1])
+                        text = f"{scheduler[0]}"
+                    text = text.replace("ancestral", "a").replace("uniform", "u").replace("exponential","exp")
 
-                lora_dict = [[t,] for t in dict_map.get("LoRA", [])] if dict_map.get("LoRA", []) else []
+                # If var_type is "Denoise", update denoise and generate labels
+                elif var_type == "Denoise":
+                    denoise = var
+                    text = f"Denoise: {round(denoise, 2)}"
 
-                # If both ckpt_dict and lora_dict are not empty, manipulate lora_dict as described
-                if ckpt_dict and lora_dict:
-                    lora_dict = [(lora_stack, ckpt) for ckpt in ckpt_dict for lora_stack in lora_dict]
-                # If lora_dict is not empty and ckpt_dict is empty, insert ckpt_name into each tuple in lora_dict
-                elif lora_dict:
-                    lora_dict = [(lora_stack, ckpt_name) for lora_stack in lora_dict]
+                # If var_type is "VAE", update vae_name and generate labels
+                elif var_type == "VAE":
+                    vae_name = var
+                    vae_filename = os.path.splitext(os.path.basename(vae_name))[0]
+                    text = f"VAE: {vae_filename}"
 
-                vae_dict = dict_map.get("VAE", [])
+                # If var_type is "Positive Prompt S/R", update positive_prompt and generate labels
+                elif var_type == "Positive Prompt S/R":
+                    search_txt, replace_txt = var
+                    if replace_txt != None:
+                        positive_prompt = (positive_prompt[1].replace(search_txt, replace_txt, 1), positive_prompt[1])
+                    else:
+                        positive_prompt = (positive_prompt[1], positive_prompt[1])
+                        replace_txt = search_txt
+                    text = f"{replace_txt}"
 
-                # prioritize Caching Checkpoints over LoRAs but not both.
-                if X_type == "LoRA":
-                    ckpt_dict = []
-                if X_type == "Checkpoint":
-                    lora_dict = []
+                # If var_type is "Negative Prompt S/R", update negative_prompt and generate labels
+                elif var_type == "Negative Prompt S/R":
+                    search_txt, replace_txt = var
+                    if replace_txt:
+                        negative_prompt = (negative_prompt[1].replace(search_txt, replace_txt, 1), negative_prompt[1])
+                    else:
+                        negative_prompt = (negative_prompt[1], negative_prompt[1])
+                        replace_txt = search_txt
+                    text = f"(-) {replace_txt}"
 
-                # Print dict_arrays for debugging
-                ###print(f"vae_dict={vae_dict}\nckpt_dict={ckpt_dict}\nlora_dict={lora_dict}")
+                # If var_type is "AScore+", update positive ascore and generate labels
+                elif var_type == "AScore+":
+                    ascore = (var,ascore[1])
+                    text = f"+AScore: {ascore[0]}"
 
-                # Clean values that won't be reused
-                clear_cache_by_exception(script_node_id, vae_dict=vae_dict, ckpt_dict=ckpt_dict, lora_dict=lora_dict)
+                # If var_type is "AScore-", update negative ascore and generate labels
+                elif var_type == "AScore-":
+                    ascore = (ascore[0],var)
+                    text = f"-AScore: {ascore[1]}"
 
-                # Print loaded_objects for debugging
-                ###print_loaded_objects_entries()
+                # If var_type is "Checkpoint", update model and clip (if needed) and generate labels
+                elif var_type == "Checkpoint":
+                    ckpt_name = var[0]
+                    if var[1] == None:
+                        clip_skip = (clip_skip[1],clip_skip[1])
+                    else:
+                        clip_skip = (var[1],clip_skip[1])
+                    if var[2] != None:
+                        vae_name = var[2]
+                    ckpt_filename = os.path.splitext(os.path.basename(ckpt_name))[0]
+                    text = f"{ckpt_filename}"
 
-                #_______________________________________________________________________________________________________
-                # Function that changes appropiate variables for next processed generations (also generates XY_labels)
-                def define_variable(var_type, var, add_noise, seed, steps, start_at_step, end_at_step,
-                                    return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                    clip_skip, positive_prompt, negative_prompt, lora_stack, cnet_stack, var_label, num_label):
+                # If var_type is "Refiner", update model and clip (if needed) and generate labels
+                elif var_type == "Refiner":
+                    refiner_name = var[0]
+                    if var[1] == None:
+                        refiner_clip_skip = (refiner_clip_skip[1],refiner_clip_skip[1])
+                    else:
+                        refiner_clip_skip = (var[1],refiner_clip_skip[1])
+                    ckpt_filename = os.path.splitext(os.path.basename(refiner_name))[0]
+                    text = f"{ckpt_filename}"
 
-                    # Define default max label size limit
-                    max_label_len = 36
+                # If var_type is "Refiner On/Off", set end_at_step = max steps and generate labels
+                elif var_type == "Refiner On/Off":
+                    end_at_step = int(var * steps)
+                    text = f"Refiner: {'On' if var < 1 else 'Off'}"
 
-                    # If var_type is "AddNoise", update 'add_noise' with 'var', and generate text label
-                    if var_type == "AddNoise":
-                        add_noise = var
-                        text = f"AddNoise: {add_noise}"
+                elif var_type == "Clip Skip":
+                    clip_skip = (var, clip_skip[1])
+                    text = f"ClipSkip ({clip_skip[0]})"
 
-                    # If var_type is "Seeds++ Batch", generate text label
-                    elif var_type == "Seeds++ Batch":
-                        text = f"Seed: {seed}"
+                elif var_type == "Clip Skip (Refiner)":
+                    refiner_clip_skip = (var, refiner_clip_skip[1])
+                    text = f"RefClipSkip ({refiner_clip_skip[0]})"
 
-                    # If var_type is "Steps", update 'steps' with 'var' and generate text label
-                    elif var_type == "Steps":
-                        steps = var
-                        text = f"Steps: {steps}"
+                elif "LoRA" in var_type:
+                    if not lora_stack:
+                        lora_stack = var.copy()
+                    else:
+                        # Updating the first tuple of lora_stack
+                        lora_stack[0] = tuple(v if v is not None else lora_stack[0][i] for i, v in enumerate(var[0]))
 
-                    # If var_type is "StartStep", update 'start_at_step' with 'var' and generate text label
-                    elif var_type == "StartStep":
-                        start_at_step = var
-                        text = f"StartStep: {start_at_step}"
+                    max_label_len = 50 + (12 * (len(lora_stack) - 1))
+                    lora_name, lora_model_wt, lora_clip_wt = lora_stack[0]
+                    lora_filename = os.path.splitext(os.path.basename(lora_name))[0]
 
-                    # If var_type is "EndStep", update 'end_at_step' with 'var' and generate text label
-                    elif var_type == "EndStep":
-                        end_at_step = var
-                        text = f"EndStep: {end_at_step}"
-
-                    # If var_type is "ReturnNoise", update 'return_with_leftover_noise' with 'var', and generate text label
-                    elif var_type == "ReturnNoise":
-                        return_with_leftover_noise = var
-                        text = f"ReturnNoise: {return_with_leftover_noise}"
-
-                    # If var_type is "CFG Scale", update cfg with var and generate text label
-                    elif var_type == "CFG Scale":
-                        cfg = var
-                        text = f"CFG: {round(cfg,2)}"
-
-                    # If var_type is "Sampler", update sampler_name and scheduler with var, and generate text label
-                    elif var_type == "Sampler":
-                        sampler_name = var[0]
-                        if var[1] == "":
-                            text = f"{sampler_name}"
-                        else:
-                            if var[1] != None:
-                                scheduler = (var[1], scheduler[1])
-                            else:
-                                scheduler = (scheduler[1], scheduler[1])
-                            text = f"{sampler_name} ({scheduler[0]})"
-                        text = text.replace("ancestral", "a").replace("uniform", "u").replace("exponential","exp")
-
-                    # If var_type is "Scheduler", update scheduler and generate labels
-                    elif var_type == "Scheduler":
-                        if len(var) == 2:
-                            scheduler = (var[0], scheduler[1])
-                            text = f"{sampler_name} ({scheduler[0]})"
-                        else:
-                            scheduler = (var, scheduler[1])
-                            text = f"{scheduler[0]}"
-                        text = text.replace("ancestral", "a").replace("uniform", "u").replace("exponential","exp")
-
-                    # If var_type is "Denoise", update denoise and generate labels
-                    elif var_type == "Denoise":
-                        denoise = var
-                        text = f"Denoise: {round(denoise, 2)}"
-
-                    # If var_type is "VAE", update vae_name and generate labels
-                    elif var_type == "VAE":
-                        vae_name = var
-                        vae_filename = os.path.splitext(os.path.basename(vae_name))[0]
-                        text = f"VAE: {vae_filename}"
-
-                    # If var_type is "Positive Prompt S/R", update positive_prompt and generate labels
-                    elif var_type == "Positive Prompt S/R":
-                        search_txt, replace_txt = var
-                        if replace_txt != None:
-                            positive_prompt = (positive_prompt[1].replace(search_txt, replace_txt, 1), positive_prompt[1])
-                        else:
-                            positive_prompt = (positive_prompt[1], positive_prompt[1])
-                            replace_txt = search_txt
-                        text = f"{replace_txt}"
-
-                    # If var_type is "Negative Prompt S/R", update negative_prompt and generate labels
-                    elif var_type == "Negative Prompt S/R":
-                        search_txt, replace_txt = var
-                        if replace_txt:
-                            negative_prompt = (negative_prompt[1].replace(search_txt, replace_txt, 1), negative_prompt[1])
-                        else:
-                            negative_prompt = (negative_prompt[1], negative_prompt[1])
-                            replace_txt = search_txt
-                        text = f"(-) {replace_txt}"
-
-                    # If var_type is "Checkpoint", update model and clip (if needed) and generate labels
-                    elif var_type == "Checkpoint":
-                        ckpt_name = var[0]
-                        if var[1] == None:
-                            clip_skip = (clip_skip[1],clip_skip[1])
-                        else:
-                            clip_skip = (var[1],clip_skip[1])
-                        ckpt_filename = os.path.splitext(os.path.basename(ckpt_name))[0]
-                        text = f"{ckpt_filename}"
-
-                    elif var_type == "Clip Skip":
-                        clip_skip = (var, clip_skip[1])
-                        text = f"ClipSkip ({clip_skip[0]})"
-
-                    elif var_type == "LoRA":
-                        lora_stack = var
-                        max_label_len = 30 + (12 * (len(lora_stack)-1))
+                    if var_type == "LoRA":
                         if len(lora_stack) == 1:
-                            lora_name, lora_model_wt, lora_clip_wt = lora_stack[0]
-                            lora_filename = os.path.splitext(os.path.basename(lora_name))[0]
                             lora_model_wt = format(float(lora_model_wt), ".2f").rstrip('0').rstrip('.')
                             lora_clip_wt = format(float(lora_clip_wt), ".2f").rstrip('0').rstrip('.')
                             lora_filename = lora_filename[:max_label_len - len(f"LoRA: ({lora_model_wt})")]
@@ -814,636 +1219,868 @@ class TSC_KSampler:
                             else:
                                 text = f"LoRA: {lora_filename}({lora_model_wt},{lora_clip_wt})"
                         elif len(lora_stack) > 1:
-                            lora_filenames = [os.path.splitext(os.path.basename(lora_name))[0] for lora_name, _, _ in lora_stack]
+                            lora_filenames = [os.path.splitext(os.path.basename(lora_name))[0] for lora_name, _, _ in
+                                              lora_stack]
                             lora_details = [(format(float(lora_model_wt), ".2f").rstrip('0').rstrip('.'),
-                                             format(float(lora_clip_wt), ".2f").rstrip('0').rstrip('.')) for _, lora_model_wt, lora_clip_wt in lora_stack]
-                            non_name_length = sum(len(f"({lora_details[i][0]},{lora_details[i][1]})") + 2 for i in range(len(lora_stack)))
+                                             format(float(lora_clip_wt), ".2f").rstrip('0').rstrip('.')) for
+                                            _, lora_model_wt, lora_clip_wt in lora_stack]
+                            non_name_length = sum(
+                                len(f"({lora_details[i][0]},{lora_details[i][1]})") + 2 for i in range(len(lora_stack)))
                             available_space = max_label_len - non_name_length
                             max_name_length = available_space // len(lora_stack)
                             lora_filenames = [filename[:max_name_length] for filename in lora_filenames]
-                            text_elements = [f"{lora_filename}({lora_details[i][0]})" if lora_details[i][0] == lora_details[i][1] else f"{lora_filename}({lora_details[i][0]},{lora_details[i][1]})" for i, lora_filename in enumerate(lora_filenames)]
+                            text_elements = [
+                                f"{lora_filename}({lora_details[i][0]})" if lora_details[i][0] == lora_details[i][1]
+                                else f"{lora_filename}({lora_details[i][0]},{lora_details[i][1]})" for i, lora_filename in
+                                enumerate(lora_filenames)]
                             text = " ".join(text_elements)
-                            
-                    elif var_type == "ControlNetStr":
-                        cnet_stack = var
-                        text = f'ControlNetStr: {round(cnet_stack[0][2], 3)}'
 
-                    else: # No matching type found
-                        text=""
+                    elif var_type == "LoRA Batch":
+                        text = f"LoRA: {lora_filename}"
 
-                    def truncate_texts(texts, num_label, max_label_len):
-                        truncate_length = max(min(max(len(text) for text in texts), max_label_len), 24)
+                    elif var_type == "LoRA Wt":
+                        lora_model_wt = format(float(lora_model_wt), ".2f").rstrip('0').rstrip('.')
+                        text = f"LoRA[Wt]: {lora_model_wt}"
 
-                        return [text if len(text) <= truncate_length else text[:truncate_length] + "..." for text in
-                                texts]
+                    elif var_type == "LoRA MStr":
+                        lora_model_wt = format(float(lora_model_wt), ".2f").rstrip('0').rstrip('.')
+                        text = f"LoRA[M]: {lora_model_wt}"
 
-                    # Add the generated text to var_label if it's not full
-                    if len(var_label) < num_label:
-                        var_label.append(text)
+                    elif var_type == "LoRA CStr":
+                        lora_clip_wt = format(float(lora_clip_wt), ".2f").rstrip('0').rstrip('.')
+                        text = f"LoRA[C]: {lora_clip_wt}"
 
-                    # If var_type VAE , truncate entries in the var_label list when it's full
-                    if len(var_label) == num_label and (var_type == "VAE" or var_type == "Checkpoint" or var_type == "LoRA"):
-                        var_label = truncate_texts(var_label, num_label, max_label_len)
+                elif var_type in ["ControlNetStrength", "ControlNetStart%", "ControlNetEnd%"]:
+                    if "Strength" in var_type:
+                        entry_index = 2
+                    elif "Start%" in var_type:
+                        entry_index = 3
+                    elif "End%" in var_type:
+                        entry_index = 4
 
-                    # Return the modified variables
-                    return add_noise, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
-                        sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, \
-                        positive_prompt, negative_prompt, lora_stack, cnet_stack, var_label
-
-                #_______________________________________________________________________________________________________
-                # The function below is used to smartly load Checkpoint/LoRA/VAE models between generations.
-                def define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip, vae,
-                                 vae_name, ckpt_name, lora_stack, cnet_stack, index, types, script_node_id, cache):
-        
-                    # Encode prompt, apply clip_skip, and Control Net (if given). Return new conditioning.
-                    def encode_prompt(positive_prompt, negative_prompt, clip, clip_skip, cnet_stack):
-                        clip = CLIPSetLastLayer().set_last_layer(clip, clip_skip)[0]
-                        positive_encoded = CLIPTextEncode().encode(clip, positive_prompt)[0]
-                        negative_encoded = CLIPTextEncode().encode(clip, negative_prompt)[0]
-
-                        # Recursively apply Control Net to the positive encoding for each entry in the stack
-                        if cnet_stack is not None:
-                            for control_net_tuple in cnet_stack:
-                                control_net, image, strength = control_net_tuple
-                                positive_encoded = \
-                                ControlNetApply().apply_controlnet(positive_encoded, control_net, image, strength)[0]
-
-                        return positive_encoded, negative_encoded
-
-                    # Variable to track wether to encode prompt or not
-                    encode = False
-
-                    # Unpack types tuple
-                    X_type, Y_type = types
-
-                    # Note: Index is held at 0 when Y_type == "Nothing"
-
-                    # Load VAE if required
-                    if (X_type == "VAE" and index == 0) or Y_type == "VAE":
-                        vae = load_vae(vae_name, script_node_id, cache=cache[0])
-
-                    # Load Checkpoint if required. If Y_type is LoRA, required models will be loaded by load_lora func.
-                    if (X_type == "Checkpoint" and index == 0 and Y_type != "LoRA"):
-                        if lora_stack is None:
-                            model, clip, _ = load_checkpoint(ckpt_name, script_node_id, output_vae=False, cache=cache[1])
-                        else: # Load Efficient Loader LoRA
-                            model, clip = load_lora(lora_stack, ckpt_name, script_node_id,
-                                                    cache=None, ckpt_cache=cache[1])
-                        encode = True
-
-                    # Load LoRA if required
-                    elif (X_type == "LoRA" and index == 0):
-                        # Don't cache Checkpoints
-                        model, clip = load_lora(lora_stack, ckpt_name, script_node_id, cache=cache[2])
-                        encode = True
-                        
-                    elif Y_type == "LoRA":  # X_type must be Checkpoint, so cache those as defined
-                        model, clip = load_lora(lora_stack, ckpt_name, script_node_id,
-                                                cache=None, ckpt_cache=cache[1])
-                        encode = True
-
-                    # Encode Prompt if required
-                    prompt_types = ["Positive Prompt S/R", "Negative Prompt S/R", "Clip Skip", "ControlNetStr"]
-                    if (X_type in prompt_types and index == 0) or Y_type in prompt_types:
-                        encode = True
-
-                    # Encode prompt if encode == True
-                    if encode == True:
-                        positive, negative = encode_prompt(positive_prompt[0], negative_prompt[0], clip, clip_skip, cnet_stack)
-                        
-                    return model, positive, negative, vae
-
-                # ______________________________________________________________________________________________________
-                # The below function is used to generate the results based on all the processed variables
-                def process_values(model, add_noise, seed, steps, start_at_step, end_at_step, return_with_leftover_noise,
-                                   cfg, sampler_name, scheduler, positive, negative, latent_image, denoise, vae, vae_decode,
-                                   ksampler_adv_flag, latent_list=[], image_tensor_list=[], image_pil_list=[]):
-
-                    if preview_method != "none":
-                        send_command_to_frontend(startListening=True, maxCount=steps - 1, sendBlob=False)
-
-                    # Sample using the Comfy KSampler nodes
-                    if ksampler_adv_flag == False:
-                        samples = KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler,
-                                                    positive, negative, latent_image, denoise=denoise)
+                    # If the first entry of cnet_stack is None, set it to var
+                    if cnet_stack[0] is None:
+                        cnet_stack = (var, cnet_stack[1])
                     else:
-                        samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler,
-                                                            positive, negative, latent_image, start_at_step, end_at_step,
-                                                            return_with_leftover_noise, denoise=1.0)
+                        # Extract the desired entry from var's first tuple
+                        entry_from_var = var[0][entry_index]
 
-                    # Decode images and store
-                    latent = samples[0]["samples"]
+                        # Extract the first tuple from cnet_stack[0][0] and make it mutable
+                        first_cn_entry = list(cnet_stack[0][0])
 
-                    # Add the latent tensor to the tensors list
-                    latent_list.append(latent)
+                        # Replace the appropriate entry
+                        first_cn_entry[entry_index] = entry_from_var
 
-                    # Decode the latent tensor
-                    image = vae_decode_latent(latent, vae_decode)
+                        # Further update first_cn_entry based on cnet_stack[1]
+                        for i, value in enumerate(cnet_stack[1][-3:]):  # Considering last 3 entries
+                            if value is not None:
+                                first_cn_entry[i + 2] = value  # "+2" to offset for the first 2 entries of the tuple
 
-                    # Add the resulting image tensor to image_tensor_list
-                    image_tensor_list.append(image)
+                        # Convert back to tuple for the updated values
+                        updated_first_entry = tuple(first_cn_entry)
 
-                    # Convert the image from tensor to PIL Image and add it to the image_pil_list
-                    image_pil_list.append(tensor2pil(image))
+                        # Construct the updated cnet_stack[0] using the updated_first_entry and the rest of the values from cnet_stack[0]
+                        updated_cnet_stack_0 = [updated_first_entry] + list(cnet_stack[0][1:])
 
-                    # Return the touched variables
-                    return latent_list, image_tensor_list, image_pil_list
+                        # Update cnet_stack
+                        cnet_stack = (updated_cnet_stack_0, cnet_stack[1])
 
-                # ______________________________________________________________________________________________________
-                # The below section is the heart of the XY Plot image generation
+                    # Print the desired value
+                    text = f'{var_type}: {round(cnet_stack[0][0][entry_index], 3)}'
 
-                 # Initiate Plot label text variables X/Y_label
-                X_label = []
-                Y_label = []
+                else: # No matching type found
+                    text=""
 
-                # Seed_updated for "Seeds++ Batch" incremental seeds
-                seed_updated = seed
+                def truncate_texts(texts, num_label, max_label_len):
+                    truncate_length = max(min(max(len(text) for text in texts), max_label_len), 24)
 
-                # Store the KSamplers original scheduler inside the same scheduler variable
-                scheduler = (scheduler, scheduler)
+                    return [text if len(text) <= truncate_length else text[:truncate_length] + "..." for text in
+                            texts]
 
-                # Store the Eff Loaders original clip_skip inside the same clip_skip variable
-                clip_skip = (clip_skip, clip_skip)
+                # Add the generated text to var_label if it's not full
+                if len(var_label) < num_label:
+                    var_label.append(text)
 
-                # Store types in a Tuple for easy function passing
-                types = (X_type, Y_type)
+                # If var_type VAE , truncate entries in the var_label list when it's full
+                if len(var_label) == num_label and (var_type == "VAE" or var_type == "Checkpoint"
+                                                    or var_type == "Refiner" or "LoRA" in var_type):
+                    var_label = truncate_texts(var_label, num_label, max_label_len)
 
-                # Store the global preview method
-                previous_preview_method = global_preview_method()
+                # Return the modified variables
+                return add_noise, seed, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
+                    sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip, \
+                    refiner_name, refiner_clip_skip, positive_prompt, negative_prompt, ascore,\
+                    lora_stack, cnet_stack, var_label
 
-                # Change the global preview method temporarily during this node's execution
-                set_preview_method(preview_method)
+            #_______________________________________________________________________________________________________
+            # The function below is used to optimally load Checkpoint/LoRA/VAE models between generations.
+            def define_model(model, clip, clip_skip, refiner_model, refiner_clip, refiner_clip_skip,
+                             ckpt_name, refiner_name, positive, negative, refiner_positive, refiner_negative,
+                             positive_prompt, negative_prompt, ascore, vae, vae_name, lora_stack, cnet_stack, index,
+                             types, xyplot_id, cache, sampler_type, empty_latent_width, empty_latent_height):
 
-                # Fill Plot Rows (X)
-                for X_index, X in enumerate(X_value):
+                # Variable to track wether to encode prompt or not
+                encode = False
+                encode_refiner = False
 
+                # Unpack types tuple
+                X_type, Y_type = types
+
+                # Note: Index is held at 0 when Y_type == "Nothing"
+
+                # Load Checkpoint if required. If Y_type is LoRA, required models will be loaded by load_lora func.
+                if (X_type == "Checkpoint" and index == 0 and Y_type != "LoRA"):
+                    if lora_stack is None:
+                        model, clip, _ = load_checkpoint(ckpt_name, xyplot_id, cache=cache[1])
+                    else: # Load Efficient Loader LoRA
+                        model, clip = load_lora(lora_stack, ckpt_name, xyplot_id,
+                                                cache=None, ckpt_cache=cache[1])
+                    encode = True
+
+                # Load LoRA if required
+                elif (X_type == "LoRA" and index == 0):
+                    # Don't cache Checkpoints
+                    model, clip = load_lora(lora_stack, ckpt_name, xyplot_id, cache=cache[2])
+                    encode = True
+                elif Y_type == "LoRA":  # X_type must be Checkpoint, so cache those as defined
+                    model, clip = load_lora(lora_stack, ckpt_name, xyplot_id,
+                                            cache=None, ckpt_cache=cache[1])
+                    encode = True
+                elif X_type == "LoRA Batch" or X_type == "LoRA Wt" or X_type == "LoRA MStr" or X_type == "LoRA CStr":
+                    # Don't cache Checkpoints or LoRAs
+                    model, clip = load_lora(lora_stack, ckpt_name, xyplot_id, cache=0)
+                    encode = True
+
+                if (X_type == "Refiner" and index == 0) or Y_type == "Refiner":
+                    refiner_model, refiner_clip, _ = \
+                        load_checkpoint(refiner_name, xyplot_id, output_vae=False, cache=cache[3], ckpt_type="refn")
+                    encode_refiner = True
+
+                # Encode base prompt if required
+                encode_types = ["Positive Prompt S/R", "Negative Prompt S/R", "Clip Skip", "ControlNetStrength",
+                                "ControlNetStart%",  "ControlNetEnd%"]
+                if (X_type in encode_types and index == 0) or Y_type in encode_types:
+                    encode = True
+
+                # Encode refiner prompt if required
+                encode_refiner_types = ["Positive Prompt S/R", "Negative Prompt S/R", "AScore+", "AScore-",
+                                        "Clip Skip (Refiner)"]
+                if (X_type in encode_refiner_types and index == 0) or Y_type in encode_refiner_types:
+                    encode_refiner = True
+
+                # Encode base prompt
+                if encode == True:
+                    positive, negative = \
+                        encode_prompts(positive_prompt, negative_prompt, clip, clip_skip, refiner_clip,
+                                       refiner_clip_skip, ascore, sampler_type == "sdxl", empty_latent_width,
+                                       empty_latent_height, return_type="base")
+                    # Apply ControlNet Stack if given
+                    if cnet_stack:
+                        positive = TSC_Apply_ControlNet_Stack().apply_cnet_stack(positive, cnet_stack)
+
+                if encode_refiner == True:
+                    refiner_positive, refiner_negative = \
+                        encode_prompts(positive_prompt, negative_prompt, clip, clip_skip, refiner_clip,
+                                       refiner_clip_skip, ascore, sampler_type == "sdxl", empty_latent_width,
+                                       empty_latent_height, return_type="refiner")
+
+                # Load VAE if required
+                if (X_type == "VAE" and index == 0) or Y_type == "VAE":
+                    #vae = load_vae(vae_name, xyplot_id, cache=cache[0])
+                    vae = get_bvae_by_ckpt_name(ckpt_name) if vae_name == "Baked VAE" \
+                        else load_vae(vae_name, xyplot_id, cache=cache[0])
+                elif X_type == "Checkpoint" and index == 0 and vae_name:
+                    vae = get_bvae_by_ckpt_name(ckpt_name) if vae_name == "Baked VAE" \
+                        else load_vae(vae_name, xyplot_id, cache=cache[0])
+
+                return model, positive, negative, refiner_model, refiner_positive, refiner_negative, vae
+
+            # ______________________________________________________________________________________________________
+            # The below function is used to generate the results based on all the processed variables
+            def process_values(model, refiner_model, add_noise, seed, steps, start_at_step, end_at_step,
+                               return_with_leftover_noise, cfg, sampler_name, scheduler, positive, negative,
+                               refiner_positive, refiner_negative, latent_image, denoise, vae, vae_decode,
+                               sampler_type, latent_list=[], image_tensor_list=[], image_pil_list=[]):
+
+                if preview_method != "none":
+                    send_command_to_frontend(startListening=True, maxCount=steps - 1, sendBlob=False)
+
+                samples = sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
+                                              latent_image, denoise, sampler_type, add_noise, start_at_step, end_at_step,
+                                              return_with_leftover_noise, refiner_model, refiner_positive, refiner_negative)
+
+                # Add the latent tensor to the tensors list
+                latent_list.append(samples)
+
+                # Decode the latent tensor
+                image = vae_decode_latent(vae, samples, vae_decode)
+
+                # Add the resulting image tensor to image_tensor_list
+                image_tensor_list.append(image)
+
+                # Convert the image from tensor to PIL Image and add it to the image_pil_list
+                image_pil_list.append(tensor2pil(image))
+
+                # Return the touched variables
+                return latent_list, image_tensor_list, image_pil_list
+
+            # ______________________________________________________________________________________________________
+            # The below section is the heart of the XY Plot image generation
+
+             # Initiate Plot label text variables X/Y_label
+            X_label = []
+            Y_label = []
+
+            # Store the KSamplers original scheduler inside the same scheduler variable
+            scheduler = (scheduler, scheduler)
+
+            # Store the Eff Loaders original clip_skips inside the same clip_skip variables
+            clip_skip = (clip_skip, clip_skip)
+            refiner_clip_skip = (refiner_clip_skip, refiner_clip_skip)
+
+            # Store types in a Tuple for easy function passing
+            types = (X_type, Y_type)
+
+            # Store the global preview method
+            previous_preview_method = global_preview_method()
+
+            # Change the global preview method temporarily during this node's execution
+            set_preview_method(preview_method)
+
+            # Fill Plot Rows (X)
+            for X_index, X in enumerate(X_value):
+
+                # Define X parameters and generate labels
+                add_noise, seed, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
+                    sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip,\
+                    refiner_name, refiner_clip_skip, positive_prompt, negative_prompt, ascore,\
+                    lora_stack, cnet_stack, X_label = \
+                    define_variable(X_type, X, add_noise, seed, steps, start_at_step, end_at_step,
+                                    return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name,
+                                    ckpt_name, clip_skip, refiner_name, refiner_clip_skip, positive_prompt,
+                                    negative_prompt, ascore, lora_stack, cnet_stack, X_label, len(X_value))
+
+                if X_type != "Nothing" and Y_type == "Nothing":
+
+                    # Models & Conditionings
+                    model, positive, negative, refiner_model, refiner_positive, refiner_negative, vae = \
+                        define_model(model, clip, clip_skip[0], refiner_model, refiner_clip, refiner_clip_skip[0],
+                                     ckpt_name, refiner_name, positive, negative, refiner_positive, refiner_negative,
+                                     positive_prompt[0], negative_prompt[0], ascore, vae, vae_name, lora_stack, cnet_stack[0],
+                                     0, types, xyplot_id, cache, sampler_type, empty_latent_width, empty_latent_height)
+
+                    # Generate Results
+                    latent_list, image_tensor_list, image_pil_list = \
+                        process_values(model, refiner_model, add_noise, seed, steps, start_at_step, end_at_step,
+                                       return_with_leftover_noise, cfg, sampler_name, scheduler[0], positive, negative,
+                                       refiner_positive, refiner_negative, latent_image, denoise, vae, vae_decode, sampler_type)
+
+                elif X_type != "Nothing" and Y_type != "Nothing":
                     # Seed control based on loop index during Batch
-                    if X_type == "Seeds++ Batch":
-                        # Update seed based on the inner loop index
-                        seed_updated = seed + X_index
+                    for Y_index, Y in enumerate(Y_value):
 
-                    # Define X parameters and generate labels
-                    add_noise, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
-                        sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip,\
-                        positive_prompt, negative_prompt, lora_stack, cnet_stack, X_label = \
-                        define_variable(X_type, X, add_noise, seed_updated, steps, start_at_step, end_at_step,
-                                        return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name,
-                                        ckpt_name, clip_skip, positive_prompt, negative_prompt, lora_stack, cnet_stack, X_label, len(X_value))
-
-                    if X_type != "Nothing" and Y_type == "Nothing":
+                        # Define Y parameters and generate labels
+                        add_noise, seed, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
+                            sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip,\
+                            refiner_name, refiner_clip_skip, positive_prompt, negative_prompt, ascore,\
+                            lora_stack, cnet_stack, Y_label = \
+                            define_variable(Y_type, Y, add_noise, seed, steps, start_at_step, end_at_step,
+                                            return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name,
+                                            ckpt_name, clip_skip, refiner_name, refiner_clip_skip, positive_prompt,
+                                            negative_prompt, ascore, lora_stack, cnet_stack, Y_label, len(Y_value))
 
                         # Models & Conditionings
-                        model, positive, negative , vae = \
-                            define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip[0], vae,
-                                         vae_name, ckpt_name, lora_stack, cnet_stack, 0, types, script_node_id, cache)
+                        model, positive, negative, refiner_model, refiner_positive, refiner_negative, vae = \
+                            define_model(model, clip, clip_skip[0], refiner_model, refiner_clip, refiner_clip_skip[0],
+                                         ckpt_name, refiner_name, positive, negative, refiner_positive, refiner_negative,
+                                         positive_prompt[0], negative_prompt[0], ascore, vae, vae_name, lora_stack, cnet_stack[0],
+                                         Y_index, types, xyplot_id, cache, sampler_type, empty_latent_width,
+                                         empty_latent_height)
 
                         # Generate Results
                         latent_list, image_tensor_list, image_pil_list = \
-                            process_values(model, add_noise, seed_updated, steps, start_at_step, end_at_step,
+                            process_values(model, refiner_model, add_noise, seed, steps, start_at_step, end_at_step,
                                            return_with_leftover_noise, cfg, sampler_name, scheduler[0],
-                                           positive, negative, latent_image, denoise, vae, vae_decode, ksampler_adv_flag)
+                                           positive, negative, refiner_positive, refiner_negative, latent_image,
+                                           denoise, vae, vae_decode, sampler_type)
 
-                    elif X_type != "Nothing" and Y_type != "Nothing":
-                        # Seed control based on loop index during Batch
-                        for Y_index, Y in enumerate(Y_value):
+            # Clean up cache
+            if cache_models == "False":
+                clear_cache_by_exception(xyplot_id, vae_dict=[], ckpt_dict=[], lora_dict=[], refn_dict=[])
+            else:
+                # Avoid caching models accross both X and Y
+                if X_type == "Checkpoint":
+                    clear_cache_by_exception(xyplot_id, lora_dict=[], refn_dict=[])
+                elif X_type == "Refiner":
+                    clear_cache_by_exception(xyplot_id, ckpt_dict=[], lora_dict=[])
+                elif X_type == "LoRA":
+                    clear_cache_by_exception(xyplot_id, ckpt_dict=[], refn_dict=[])
 
-                            if Y_type == "Seeds++ Batch":
-                                # Update seed based on the inner loop index
-                                seed_updated = seed + Y_index
+            # __________________________________________________________________________________________________________
+            # Function for printing all plot variables (WARNING: This function is an absolute mess)
+            def print_plot_variables(X_type, Y_type, X_value, Y_value, add_noise, seed, steps, start_at_step, end_at_step,
+                                     return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
+                                     clip_skip, refiner_name, refiner_clip_skip, ascore, lora_stack, cnet_stack, sampler_type,
+                                     num_rows, num_cols, latent_height, latent_width):
 
-                            # Define Y parameters and generate labels
-                            add_noise, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
-                                sampler_name, scheduler, denoise, vae_name, ckpt_name, clip_skip,\
-                                positive_prompt, negative_prompt, lora_stack, cnet_stack, Y_label = \
-                                define_variable(Y_type, Y, add_noise, seed_updated, steps, start_at_step, end_at_step,
-                                                return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                                clip_skip, positive_prompt, negative_prompt, lora_stack, cnet_stack, Y_label, len(Y_value))
+                print("-" * 40)  # Print an empty line followed by a separator line
+                print(f"{xyplot_message('XY Plot Results:')}")
 
-                            # Models & Conditionings
-                            model, positive, negative, vae = \
-                                define_model(model, clip, positive, negative, positive_prompt, negative_prompt, clip_skip[0], vae,
-                                         vae_name, ckpt_name, lora_stack, cnet_stack, Y_index, types, script_node_id, cache)
+                def get_vae_name(X_type, Y_type, X_value, Y_value, vae_name):
+                    if X_type == "VAE":
+                        vae_name = "\n      ".join(map(lambda x: os.path.splitext(os.path.basename(str(x)))[0], X_value))
+                    elif Y_type == "VAE":
+                        vae_name = "\n      ".join(map(lambda y: os.path.splitext(os.path.basename(str(y)))[0], Y_value))
+                    elif vae_name:
+                        vae_name = os.path.splitext(os.path.basename(str(vae_name)))[0]
+                    else:
+                        vae_name = ""
+                    return vae_name
 
-                            # Generate Results
-                            latent_list, image_tensor_list, image_pil_list = \
-                                process_values(model, add_noise, seed_updated, steps, start_at_step, end_at_step,
-                                               return_with_leftover_noise, cfg, sampler_name, scheduler[0],
-                                               positive, negative, latent_image, denoise, vae, vae_decode, ksampler_adv_flag)
+                def get_clip_skip(X_type, Y_type, X_value, Y_value, cskip):
+                    if "Clip Skip" in X_type:
+                        cskip = ", ".join(map(str, X_value))
+                    elif "Clip Skip" in Y_type:
+                        cskip = ", ".join(map(str, Y_value))
+                    elif cskip[1] != None:
+                        cskip = cskip[1]
+                    else:
+                        cskip = ""
+                    return cskip
 
-                # Clean up cache
-                if cache_models == "False":
-                    clear_cache_by_exception(script_node_id, vae_dict=[], ckpt_dict=[], lora_dict=[])
-                #
-                else:
-                    # Prioritrize Caching Checkpoints over LoRAs.
-                    if X_type == "LoRA":
-                        clear_cache_by_exception(script_node_id, ckpt_dict=[])
-                    elif X_type == "Checkpoint":
-                        clear_cache_by_exception(script_node_id, lora_dict=[])
+                def get_checkpoint_name(X_type, Y_type, X_value, Y_value, ckpt_name, clip_skip, mode, vae_name=None):
 
-                # ______________________________________________________________________________________________________
-                def print_plot_variables(X_type, Y_type, X_value, Y_value, add_noise, seed, steps, start_at_step, end_at_step,
-                                         return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                         clip_skip, lora_stack, ksampler_adv_flag, num_rows, num_cols, latent_height, latent_width):
+                    # Define types based on mode
+                    primary_type = "Checkpoint" if mode == "ckpt" else "Refiner"
+                    clip_type = "Clip Skip" if mode == "ckpt" else "Clip Skip (Refiner)"
 
-                    print("-" * 40)  # Print an empty line followed by a separator line
-                    print("\033[32mXY Plot Results:\033[0m")
-
-                    def get_vae_name(X_type, Y_type, X_value, Y_value, vae_name):
-                        if X_type == "VAE":
-                            vae_name = ", ".join(map(lambda x: os.path.splitext(os.path.basename(str(x)))[0], X_value))
-                        elif Y_type == "VAE":
-                            vae_name = ", ".join(map(lambda y: os.path.splitext(os.path.basename(str(y)))[0], Y_value))
+                    # Determine ckpt and othr based on primary type
+                    if X_type == primary_type:
+                        ckpt_type, ckpt_value = X_type, X_value.copy()
+                        othr_type, othr_value = Y_type, Y_value.copy()
+                    elif Y_type == primary_type:
+                        ckpt_type, ckpt_value = Y_type, Y_value.copy()
+                        othr_type, othr_value = X_type, X_value.copy()
+                    else:
+                        # Process as per original function if mode is "ckpt"
+                        if mode == "ckpt":
+                            if vae_name:
+                                vae_name = get_vae_name(X_type, Y_type, X_value, Y_value, vae_name)
+                            clip_skip = get_clip_skip(X_type, Y_type, X_value, Y_value, clip_skip)
+                            ckpt_name = os.path.basename(ckpt_name)
+                            return os.path.basename(ckpt_name), clip_skip, vae_name
                         else:
-                            vae_name = os.path.splitext(os.path.basename(str(vae_name)))[0]
-                        return vae_name
-                    
-                    def get_clip_skip(X_type, Y_type, X_value, Y_value, clip_skip):
-                        if X_type == "Clip Skip":
-                            clip_skip = ", ".join(map(str, X_value))
-                        elif Y_type == "Clip Skip":
-                            clip_skip = ", ".join(map(str, Y_value))
-                        else:
-                            clip_skip = clip_skip[1]
-                        return clip_skip
+                            # For refn mode
+                            return os.path.basename(ckpt_name), clip_skip
 
-                    def get_checkpoint_name(ckpt_type, ckpt_values, clip_skip_type, clip_skip_values, ckpt_name, clip_skip):
-                        if ckpt_type == "Checkpoint":
-                            if clip_skip_type == "Clip Skip":
-                                ckpt_name = ", ".join([os.path.splitext(os.path.basename(str(ckpt[0])))[0] for ckpt in ckpt_values])
-                            else:
-                                ckpt_name = ", ".join([f"{os.path.splitext(os.path.basename(str(ckpt[0])))[0]}({str(ckpt[1]) if ckpt[1] is not None else str(clip_skip_values)})"
-                                                          for ckpt in ckpt_values])
-                                clip_skip = "_"
-                        else:
-                            ckpt_name = os.path.splitext(os.path.basename(str(ckpt_name)))[0]
+                    # Process clip skip based on mode
+                    if othr_type == clip_type:
+                        clip_skip = ", ".join(map(str, othr_value))
+                    elif ckpt_value[0][1] != None:
+                        clip_skip = None
 
+                    # Process vae_name based on mode
+                    if mode == "ckpt":
+                        if othr_type == "VAE":
+                            vae_name = get_vae_name(X_type, Y_type, X_value, Y_value, vae_name)
+                        elif ckpt_value[0][2] != None:
+                            vae_name = None
+
+                    def format_name(v, _type):
+                        base = os.path.basename(v[0])
+                        if _type == clip_type and v[1] is not None:
+                            return base
+                        elif _type == "VAE" and v[1] is not None and v[2] is not None:
+                            return f"{base}({v[1]})"
+                        elif v[1] is not None and v[2] is not None:
+                            return f"{base}({v[1]}) + vae:{v[2]}"
+                        elif v[1] is not None:
+                            return f"{base}({v[1]})"
+                        else:
+                            return base
+
+                    ckpt_name = "\n      ".join([format_name(v, othr_type) for v in ckpt_value])
+                    if mode == "ckpt":
+                        return ckpt_name, clip_skip, vae_name
+                    else:
                         return ckpt_name, clip_skip
 
-                    def get_lora_name(X_type, Y_type, X_value, Y_value, lora_stack=None):
-                        if X_type != "LoRA" and Y_type != "LoRA":
-                            if lora_stack:
-                                return f"[{', '.join([f'{os.path.splitext(os.path.basename(name))[0]}({round(model_wt, 3)},{round(clip_wt, 3)})' for name, model_wt, clip_wt in lora_stack])}]"
-                            else:
-                                return None
-                        else:
-                            return get_lora_sublist_name(X_type,
-                                                         X_value) if X_type == "LoRA" else get_lora_sublist_name(Y_type, Y_value) if Y_type == "LoRA" else None
+                def get_lora_name(X_type, Y_type, X_value, Y_value, lora_stack=None):
+                    lora_name = lora_wt = lora_model_str = lora_clip_str = None
 
-                    def get_lora_sublist_name(lora_type, lora_value):
-                        return ", ".join([f"[{', '.join([f'{os.path.splitext(os.path.basename(str(x[0])))[0]}({round(x[1], 3)},{round(x[2], 3)})' for x in sublist])}]"
-                                             for sublist in lora_value])
+                    # Check for all possible LoRA types
+                    lora_types = ["LoRA", "LoRA Batch", "LoRA Wt", "LoRA MStr", "LoRA CStr"]
 
-                    # VAE, Checkpoint, Clip Skip, LoRA
-                    ckpt_type, clip_skip_type = (X_type, Y_type) if X_type in ["Checkpoint", "Clip Skip"] else (Y_type, X_type)
-                    ckpt_values, clip_skip_values = (X_value, Y_value) if X_type in ["Checkpoint", "Clip Skip"] else (Y_value, X_value)
-
-                    clip_skip = get_clip_skip(X_type, Y_type, X_value, Y_value, clip_skip)
-                    ckpt_name, clip_skip = get_checkpoint_name(ckpt_type, ckpt_values, clip_skip_type, clip_skip_values, ckpt_name, clip_skip)
-                    vae_name = get_vae_name(X_type, Y_type, X_value, Y_value, vae_name)
-                    lora_name = get_lora_name(X_type, Y_type, X_value, Y_value, lora_stack)
-
-                    # AddNoise
-                    add_noise = ", ".join(map(str, X_value)) if X_type == "AddNoise" else ", ".join(
-                        map(str, Y_value)) if Y_type == "AddNoise" else add_noise
-
-                    # Seeds++ Batch
-                    seed_list = [seed + x for x in X_value] if X_type == "Seeds++ Batch" else\
-                        [seed + y for y in Y_value] if Y_type == "Seeds++ Batch" else [seed]
-                    seed = ", ".join(map(str, seed_list))
-
-                    # Steps
-                    steps = ", ".join(map(str, X_value)) if X_type == "Steps" else ", ".join(
-                        map(str, Y_value)) if Y_type == "Steps" else steps
-
-                    # StartStep
-                    start_at_step = ", ".join(map(str, X_value)) if X_type == "StartStep" else ", ".join(
-                        map(str, Y_value)) if Y_type == "StartStep" else start_at_step
-
-                    # EndStep
-                    end_at_step = ", ".join(map(str, X_value)) if X_type == "EndStep" else ", ".join(
-                        map(str, Y_value)) if Y_type == "EndStep" else end_at_step
-
-                    # ReturnNoise
-                    return_with_leftover_noise = ", ".join(map(str, X_value)) if X_type == "ReturnNoise" else ", ".join(
-                        map(str, Y_value)) if Y_type == "ReturnNoise" else return_with_leftover_noise
-
-                    # CFG
-                    cfg = ", ".join(map(str, X_value)) if X_type == "CFG Scale" else ", ".join(
-                        map(str, Y_value)) if Y_type == "CFG Scale" else cfg
-
-                    # Sampler/Scheduler
-                    if X_type == "Sampler":
-                        if Y_type == "Scheduler":
-                            sampler_name = ", ".join([f"{x[0]}" for x in X_value])
-                            scheduler = ", ".join([f"{y}" for y in Y_value])
-                        else:
-                            sampler_name = ", ".join(
-                                [f"{x[0]}({x[1] if x[1] != '' and x[1] is not None else scheduler[1]})" for x in X_value])
-                            scheduler = "_"
-                    elif Y_type == "Sampler":
-                        if X_type == "Scheduler":
-                            sampler_name = ", ".join([f"{y[0]}" for y in Y_value])
-                            scheduler = ", ".join([f"{x}" for x in X_value])
-                        else:
-                            sampler_name = ", ".join(
-                                [f"{y[0]}({y[1] if y[1] != '' and y[1] is not None else scheduler[1]})" for y in Y_value])
-                            scheduler = "_"
+                    if X_type not in lora_types and Y_type not in lora_types:
+                        if lora_stack:
+                            names_list = []
+                            for name, model_wt, clip_wt in lora_stack:
+                                base_name = os.path.splitext(os.path.basename(name))[0]
+                                formatted_str = f"{base_name}({round(model_wt, 3)},{round(clip_wt, 3)})"
+                                names_list.append(formatted_str)
+                            lora_name = f"[{', '.join(names_list)}]"
                     else:
-                        scheduler = ", ".join([str(x[0]) if isinstance(x, tuple) else str(x) for x in X_value]) if X_type == "Scheduler" else \
-                            ", ".join([str(y[0]) if isinstance(y, tuple) else str(y) for y in Y_value]) if Y_type == "Scheduler" else scheduler[0]
+                        if X_type in lora_types:
+                            value = get_lora_sublist_name(X_type, X_value)
+                            if X_type == "LoRA" or X_type == "LoRA Batch":
+                                lora_name = value
+                            elif X_type == "LoRA MStr":
+                                lora_model_str = value
+                            elif X_type == "LoRA CStr":
+                                lora_clip_str = value
+                            elif X_type == "LoRA Wt":
+                                lora_wt = value
 
-                    denoise = ", ".join(map(str, X_value)) if X_type == "Denoise" else ", ".join(
-                        map(str, Y_value)) if Y_type == "Denoise" else denoise
+                        if Y_type in lora_types:
+                            value = get_lora_sublist_name(Y_type, Y_value)
+                            if Y_type == "LoRA" or Y_type == "LoRA Batch":
+                                lora_name = value
+                            elif Y_type == "LoRA MStr":
+                                lora_model_str = value
+                            elif Y_type == "LoRA CStr":
+                                lora_clip_str = value
+                            elif Y_type == "LoRA Wt":
+                                lora_wt = value
 
-                    # Printouts
-                    print(f"img_count: {len(X_value)*len(Y_value)}")
-                    print(f"img_dims: {latent_height} x {latent_width}")
-                    print(f"plot_dim: {num_cols} x {num_rows}")
-                    if clip_skip == "_":
-                        print(f"ckpt(clipskip): {ckpt_name if ckpt_name is not None else ''}")
+                    return lora_name, lora_wt, lora_model_str, lora_clip_str
+
+                def get_lora_sublist_name(lora_type, lora_value):
+                    if lora_type == "LoRA" or lora_type == "LoRA Batch":
+                        formatted_sublists = []
+                        for sublist in lora_value:
+                            formatted_entries = []
+                            for x in sublist:
+                                base_name = os.path.splitext(os.path.basename(str(x[0])))[0]
+                                formatted_str = f"{base_name}({round(x[1], 3)},{round(x[2], 3)})" if lora_type == "LoRA" else f"{base_name}"
+                                formatted_entries.append(formatted_str)
+                            formatted_sublists.append(f"{', '.join(formatted_entries)}")
+                        return "\n      ".join(formatted_sublists)
+                    elif lora_type == "LoRA MStr":
+                        return ", ".join([str(round(x[0][1], 3)) for x in lora_value])
+                    elif lora_type == "LoRA CStr":
+                        return ", ".join([str(round(x[0][2], 3)) for x in lora_value])
+                    elif lora_type == "LoRA Wt":
+                        return ", ".join([str(round(x[0][1], 3)) for x in lora_value])  # assuming LoRA Wt uses the second value
                     else:
-                        print(f"ckpt: {ckpt_name if ckpt_name is not None else ''}")
-                        print(f"clip_skip: {clip_skip if clip_skip is not None else ''}")
-                    if lora_name:
-                        print(f"lora(mod,clip): {lora_name if lora_name is not None else ''}")
-                    print(f"vae: {vae_name if vae_name is not None else ''}")
-                    if ksampler_adv_flag == True:
-                        print(f"add_noise: {add_noise}")
-                    print(f"seed: {seed}")
-                    print(f"steps: {steps}")
-                    if ksampler_adv_flag == True:
-                        print(f"start_at_step: {start_at_step}")
-                        print(f"end_at_step: {end_at_step}")
-                        print(f"return_noise: {return_with_leftover_noise}")
-                    print(f"cfg: {cfg}")
-                    if scheduler == "_":
-                        print(f"sampler(schr): {sampler_name}")
+                        return ""
+
+                # VAE, Checkpoint, Clip Skip, LoRA
+                ckpt_name, clip_skip, vae_name = get_checkpoint_name(X_type, Y_type, X_value, Y_value, ckpt_name, clip_skip, "ckpt", vae_name)
+                lora_name, lora_wt, lora_model_str, lora_clip_str = get_lora_name(X_type, Y_type, X_value, Y_value, lora_stack)
+                refiner_name, refiner_clip_skip = get_checkpoint_name(X_type, Y_type, X_value, Y_value, refiner_name, refiner_clip_skip, "refn")
+
+                # AddNoise
+                add_noise = ", ".join(map(str, X_value)) if X_type == "AddNoise" else ", ".join(
+                    map(str, Y_value)) if Y_type == "AddNoise" else add_noise
+
+                # Seeds++ Batch
+                seed = "\n      ".join(map(str, X_value)) if X_type == "Seeds++ Batch" else "\n      ".join(
+                    map(str, Y_value)) if Y_type == "Seeds++ Batch" else seed
+
+                # Steps
+                steps = ", ".join(map(str, X_value)) if X_type == "Steps" else ", ".join(
+                    map(str, Y_value)) if Y_type == "Steps" else steps
+
+                # StartStep
+                start_at_step = ", ".join(map(str, X_value)) if X_type == "StartStep" else ", ".join(
+                    map(str, Y_value)) if Y_type == "StartStep" else start_at_step
+
+                # EndStep/RefineStep
+                end_at_step = ", ".join(map(str, X_value)) if X_type in ["EndStep", "RefineStep"] else ", ".join(
+                    map(str, Y_value)) if Y_type in ["EndStep", "RefineStep"] else end_at_step
+
+                # ReturnNoise
+                return_with_leftover_noise = ", ".join(map(str, X_value)) if X_type == "ReturnNoise" else ", ".join(
+                    map(str, Y_value)) if Y_type == "ReturnNoise" else return_with_leftover_noise
+
+                # CFG
+                cfg = ", ".join(map(str, X_value)) if X_type == "CFG Scale" else ", ".join(
+                    map(str, Y_value)) if Y_type == "CFG Scale" else round(cfg,3)
+
+                # Sampler/Scheduler
+                if X_type == "Sampler":
+                    if Y_type == "Scheduler":
+                        sampler_name = ", ".join([f"{x[0]}" for x in X_value])
+                        scheduler = ", ".join([f"{y}" for y in Y_value])
                     else:
-                        print(f"sampler: {sampler_name}")
-                        print(f"scheduler: {scheduler}")
-                    if ksampler_adv_flag == False:
-                        print(f"denoise: {denoise}")
+                        sampler_name = ", ".join([f"{x[0]}({x[1] if x[1] != '' and x[1] is not None else scheduler[1]})" for x in X_value])
+                        scheduler = "_"
+                elif Y_type == "Sampler":
+                    if X_type == "Scheduler":
+                        sampler_name = ", ".join([f"{y[0]}" for y in Y_value])
+                        scheduler = ", ".join([f"{x}" for x in X_value])
+                    else:
+                        sampler_name = ", ".join([f"{y[0]}({y[1] if y[1] != '' and y[1] is not None else scheduler[1]})" for y in Y_value])
+                        scheduler = "_"
+                else:
+                    scheduler = ", ".join([str(x[0]) if isinstance(x, tuple) else str(x) for x in X_value]) if X_type == "Scheduler" else \
+                        ", ".join([str(y[0]) if isinstance(y, tuple) else str(y) for y in Y_value]) if Y_type == "Scheduler" else scheduler[0]
 
-                    if X_type == "Positive Prompt S/R" or Y_type == "Positive Prompt S/R":
-                        positive_prompt = ", ".join([str(x[0]) if i == 0 else str(x[1]) for i, x in enumerate(
-                            X_value)]) if X_type == "Positive Prompt S/R" else ", ".join(
-                            [str(y[0]) if i == 0 else str(y[1]) for i, y in
-                             enumerate(Y_value)]) if Y_type == "Positive Prompt S/R" else positive_prompt
-                        print(f"+prompt_s/r: {positive_prompt}")
+                # Denoise
+                denoise = ", ".join(map(str, X_value)) if X_type == "Denoise" else ", ".join(
+                    map(str, Y_value)) if Y_type == "Denoise" else round(denoise,3)
 
-                    if X_type == "Negative Prompt S/R" or Y_type == "Negative Prompt S/R":
-                        negative_prompt = ", ".join([str(x[0]) if i == 0 else str(x[1]) for i, x in enumerate(
-                            X_value)]) if X_type == "Negative Prompt S/R" else ", ".join(
-                            [str(y[0]) if i == 0 else str(y[1]) for i, y in
-                             enumerate(Y_value)]) if Y_type == "Negative Prompt S/R" else negative_prompt
-                        print(f"-prompt_s/r: {negative_prompt}")
+                # Check if ascore is None
+                if ascore is None:
+                    pos_ascore = neg_ascore = None
+                else:
+                    # Ascore+
+                    pos_ascore = (", ".join(map(str, X_value)) if X_type == "Ascore+"
+                                  else ", ".join(map(str, Y_value)) if Y_type == "Ascore+" else round(ascore[0],3))
+                    # Ascore-
+                    neg_ascore = (", ".join(map(str, X_value)) if X_type == "Ascore-"
+                                  else ", ".join(map(str, Y_value)) if Y_type == "Ascore-" else round(ascore[1],3))
 
-                    if X_type == "ControlNetStr":
-                        control_net_str = [str(round(inner_list[0][2], 3)) for inner_list in X_value if
+                #..........................................PRINTOUTS....................................................
+                print(f"(X) {X_type}")
+                print(f"(Y) {Y_type}")
+                print(f"img_count: {len(X_value)*len(Y_value)}")
+                print(f"img_dims: {latent_height} x {latent_width}")
+                print(f"plot_dim: {num_cols} x {num_rows}")
+                print(f"ckpt: {ckpt_name if ckpt_name is not None else ''}")
+                if clip_skip:
+                    print(f"clip_skip: {clip_skip}")
+                if sampler_type == "sdxl":
+                    if refiner_clip_skip == "_":
+                        print(f"refiner(clipskip): {refiner_name if refiner_name is not None else ''}")
+                    else:
+                        print(f"refiner: {refiner_name if refiner_name is not None else ''}")
+                        print(f"refiner_clip_skip: {refiner_clip_skip if refiner_clip_skip is not None else ''}")
+                        print(f"+ascore: {pos_ascore if pos_ascore is not None else ''}")
+                        print(f"-ascore: {neg_ascore if neg_ascore is not None else ''}")
+                if lora_name:
+                    print(f"lora: {lora_name if lora_name is not None else ''}")
+                if lora_wt:
+                    print(f"lora_wt: {lora_wt}")
+                if lora_model_str:
+                    print(f"lora_model_str: {lora_model_str}")
+                if lora_clip_str:
+                    print(f"lora_clip_str: {lora_clip_str}")
+                if vae_name:
+                    print(f"vae:  {vae_name}")
+                if sampler_type == "advanced":
+                    print(f"add_noise: {add_noise}")
+                print(f"seed: {seed}")
+                print(f"steps: {steps}")
+                if sampler_type == "advanced":
+                    print(f"start_at_step: {start_at_step}")
+                    print(f"end_at_step: {end_at_step}")
+                    print(f"return_noise: {return_with_leftover_noise}")
+                if sampler_type == "sdxl":
+                    print(f"start_at_step: {start_at_step}")
+                    if X_type == "Refiner On/Off":
+                        print(f"refine_at_percent: {X_value[0]}")
+                    elif Y_type == "Refiner On/Off":
+                        print(f"refine_at_percent: {Y_value[0]}")
+                    else:
+                        print(f"refine_at_step: {end_at_step}")
+                print(f"cfg: {cfg}")
+                if scheduler == "_":
+                    print(f"sampler(scheduler): {sampler_name}")
+                else:
+                    print(f"sampler: {sampler_name}")
+                    print(f"scheduler: {scheduler}")
+                if sampler_type == "regular":
+                    print(f"denoise: {denoise}")
+
+                if X_type == "Positive Prompt S/R" or Y_type == "Positive Prompt S/R":
+                    positive_prompt = ", ".join([str(x[0]) if i == 0 else str(x[1]) for i, x in enumerate(
+                        X_value)]) if X_type == "Positive Prompt S/R" else ", ".join(
+                        [str(y[0]) if i == 0 else str(y[1]) for i, y in
+                         enumerate(Y_value)]) if Y_type == "Positive Prompt S/R" else positive_prompt
+                    print(f"+prompt_s/r: {positive_prompt}")
+
+                if X_type == "Negative Prompt S/R" or Y_type == "Negative Prompt S/R":
+                    negative_prompt = ", ".join([str(x[0]) if i == 0 else str(x[1]) for i, x in enumerate(
+                        X_value)]) if X_type == "Negative Prompt S/R" else ", ".join(
+                        [str(y[0]) if i == 0 else str(y[1]) for i, y in
+                         enumerate(Y_value)]) if Y_type == "Negative Prompt S/R" else negative_prompt
+                    print(f"-prompt_s/r: {negative_prompt}")
+
+                if "ControlNet" in X_type or "ControlNet" in Y_type:
+                    cnet_strength,  cnet_start_pct, cnet_end_pct = cnet_stack[1]
+
+                if "ControlNet" in X_type:
+                    if "Strength" in X_type:
+                        cnet_strength = [str(round(inner_list[0][2], 3)) for inner_list in X_value if
                                            isinstance(inner_list, list) and
                                            inner_list and isinstance(inner_list[0], tuple) and len(inner_list[0]) >= 3]
-                        print(f"control_net_str: {', '.join(control_net_str)}")
-                    elif Y_type == "ControlNetStr":
-                        control_net_str = [str(round(inner_list[0][2], 3)) for inner_list in Y_value if
+                    if "Start%" in X_type:
+                        cnet_start_pct = [str(round(inner_list[0][3], 3)) for inner_list in X_value if
                                            isinstance(inner_list, list) and
                                            inner_list and isinstance(inner_list[0], tuple) and len(inner_list[0]) >= 3]
-                        print(f"control_net_str: {', '.join(control_net_str)}")
+                    if "End%" in X_type:
+                        cnet_end_pct = [str(round(inner_list[0][4], 3)) for inner_list in X_value if
+                                           isinstance(inner_list, list) and
+                                           inner_list and isinstance(inner_list[0], tuple) and len(inner_list[0]) >= 3]
+                if "ControlNet" in Y_type:
+                    if "Strength" in Y_type:
+                        cnet_strength = [str(round(inner_list[0][2], 3)) for inner_list in Y_value if
+                                         isinstance(inner_list, list) and
+                                         inner_list and isinstance(inner_list[0], tuple) and len(
+                                             inner_list[0]) >= 3]
+                    if "Start%" in Y_type:
+                        cnet_start_pct = [str(round(inner_list[0][3], 3)) for inner_list in Y_value if
+                                          isinstance(inner_list, list) and
+                                          inner_list and isinstance(inner_list[0], tuple) and len(
+                                              inner_list[0]) >= 3]
+                    if "End%" in Y_type:
+                        cnet_end_pct = [str(round(inner_list[0][4], 3)) for inner_list in Y_value if
+                                         isinstance(inner_list, list) and
+                                         inner_list and isinstance(inner_list[0], tuple) and len(
+                                             inner_list[0]) >= 3]
 
-                # ______________________________________________________________________________________________________
-                def adjusted_font_size(text, initial_font_size, latent_width):
-                    font = ImageFont.truetype(str(Path(font_path)), initial_font_size)
-                    text_width = font.getlength(text)
+                if "ControlNet" in X_type or "ControlNet" in Y_type:
+                    print(f"cnet_strength: {', '.join(cnet_strength) if isinstance(cnet_strength, list) else cnet_strength}")
+                    print(f"cnet_start%: {', '.join(cnet_start_pct) if isinstance(cnet_start_pct, list) else cnet_start_pct}")
+                    print(f"cnet_end%: {', '.join(cnet_end_pct) if isinstance(cnet_end_pct, list) else cnet_end_pct}")
 
-                    if text_width > (latent_width * 0.9):
-                        scaling_factor = 0.9  # A value less than 1 to shrink the font size more aggressively
-                        new_font_size = int(initial_font_size * (latent_width / text_width) * scaling_factor)
-                    else:
-                        new_font_size = initial_font_size
+            # ______________________________________________________________________________________________________
+            def adjusted_font_size(text, initial_font_size, latent_width):
+                font = ImageFont.truetype(str(Path(font_path)), initial_font_size)
+                text_width = font.getlength(text)
 
-                    return new_font_size
-
-                # ______________________________________________________________________________________________________
-                
-                # Disable vae decode on next Hold
-                update_value_by_id("vae_decode_flag", my_unique_id, False)
-
-                def rearrange_list_A(arr, num_cols, num_rows):
-                    new_list = []
-                    for i in range(num_rows):
-                        for j in range(num_cols):
-                            index = j * num_rows + i
-                            new_list.append(arr[index])
-                    return new_list
-
-                def rearrange_list_B(arr, num_rows, num_cols):
-                    new_list = []
-                    for i in range(num_rows):
-                        for j in range(num_cols):
-                            index = i * num_cols + j
-                            new_list.append(arr[index])
-                    return new_list
-
-                # Extract plot dimensions
-                num_rows = max(len(Y_value) if Y_value is not None else 0, 1)
-                num_cols = max(len(X_value) if X_value is not None else 0, 1)
-
-                # Flip X & Y results back if flipped earlier (for Checkpoint/LoRA For loop optimizations)
-                if flip_xy == True:
-                    X_type, Y_type = Y_type, X_type
-                    X_value, Y_value = Y_value, X_value
-                    X_label, Y_label = Y_label, X_label
-                    num_rows, num_cols = num_cols, num_rows
-                    image_pil_list = rearrange_list_A(image_pil_list, num_rows, num_cols)
+                if text_width > (latent_width * 0.9):
+                    scaling_factor = 0.9  # A value less than 1 to shrink the font size more aggressively
+                    new_font_size = int(initial_font_size * (latent_width / text_width) * scaling_factor)
                 else:
-                    image_pil_list = rearrange_list_B(image_pil_list, num_rows, num_cols)
-                    image_tensor_list = rearrange_list_A(image_tensor_list, num_cols, num_rows)
-                    latent_list = rearrange_list_A(latent_list, num_cols, num_rows)
+                    new_font_size = initial_font_size
 
-                # Print XY Plot Results
-                print_plot_variables(X_type, Y_type, X_value, Y_value, add_noise, seed,  steps, start_at_step, end_at_step,
-                                     return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
-                                     clip_skip, lora_stack, ksampler_adv_flag, num_rows, num_cols, latent_height, latent_width)
+                return new_font_size
 
-                # Concatenate the tensors along the first dimension (dim=0)
-                latent_list = torch.cat(latent_list, dim=0)
+            # ______________________________________________________________________________________________________
 
-                # Store latent_list as last latent
-                update_value_by_id("latent", my_unique_id, latent_list)
+            # Disable vae decode on next Hold
+            update_value_by_id("vae_decode_flag", my_unique_id, False)
 
-                # Calculate the dimensions of the white background image
-                border_size_top = latent_width // 15
+            def rearrange_list_A(arr, num_cols, num_rows):
+                new_list = []
+                for i in range(num_rows):
+                    for j in range(num_cols):
+                        index = j * num_rows + i
+                        new_list.append(arr[index])
+                return new_list
 
-                # Longest Y-label length
-                if len(Y_label) > 0:
-                    Y_label_longest = max(len(s) for s in Y_label)
-                else:
-                    # Handle the case when the sequence is empty
-                    Y_label_longest = 0  # or any other appropriate value
+            def rearrange_list_B(arr, num_rows, num_cols):
+                new_list = []
+                for i in range(num_rows):
+                    for j in range(num_cols):
+                        index = i * num_cols + j
+                        new_list.append(arr[index])
+                return new_list
 
-                Y_label_scale = min(Y_label_longest + 4,24) / 24
+            # Extract plot dimensions
+            num_rows = max(len(Y_value) if Y_value is not None else 0, 1)
+            num_cols = max(len(X_value) if X_value is not None else 0, 1)
 
+            # Flip X & Y results back if flipped earlier (for Checkpoint/LoRA For loop optimizations)
+            if flip_xy == True:
+                X_type, Y_type = Y_type, X_type
+                X_value, Y_value = Y_value, X_value
+                X_label, Y_label = Y_label, X_label
+                num_rows, num_cols = num_cols, num_rows
+                image_pil_list = rearrange_list_A(image_pil_list, num_rows, num_cols)
+            else:
+                image_pil_list = rearrange_list_B(image_pil_list, num_rows, num_cols)
+                image_tensor_list = rearrange_list_A(image_tensor_list, num_cols, num_rows)
+                latent_list = rearrange_list_A(latent_list, num_cols, num_rows)
+
+            # Extract final image dimensions
+            latent_height, latent_width = latent_list[0]['samples'].shape[2] * 8, latent_list[0]['samples'].shape[3] * 8
+
+            # Print XY Plot Results
+            print_plot_variables(X_type, Y_type, X_value, Y_value, add_noise, seed,  steps, start_at_step, end_at_step,
+                                 return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
+                                 clip_skip, refiner_name, refiner_clip_skip, ascore, lora_stack, cnet_stack,
+                                 sampler_type, num_rows, num_cols, latent_height, latent_width)
+
+            # Concatenate the 'samples' and 'noise_mask' tensors along the first dimension (dim=0)
+            keys = latent_list[0].keys()
+            result = {}
+            for key in keys:
+                tensors = [d[key] for d in latent_list]
+                result[key] = torch.cat(tensors, dim=0)
+            latent_list = result
+
+            # Store latent_list as last latent
+            update_value_by_id("latent", my_unique_id, latent_list)
+
+            # Calculate the dimensions of the white background image
+            border_size_top = latent_width // 15
+
+            # Longest Y-label length
+            if len(Y_label) > 0:
+                Y_label_longest = max(len(s) for s in Y_label)
+            else:
+                # Handle the case when the sequence is empty
+                Y_label_longest = 0  # or any other appropriate value
+
+            Y_label_scale = min(Y_label_longest + 4,24) / 24
+
+            if Y_label_orientation == "Vertical":
+                border_size_left = border_size_top
+            else:  # Assuming Y_label_orientation is "Horizontal"
+                # border_size_left is now min(latent_width, latent_height) plus 20% of the difference between the two
+                border_size_left = min(latent_width, latent_height) + int(0.2 * abs(latent_width - latent_height))
+                border_size_left = int(border_size_left * Y_label_scale)
+
+            # Modify the border size, background width and x_offset initialization based on Y_type and Y_label_orientation
+            if Y_type == "Nothing":
+                bg_width = num_cols * latent_width + (num_cols - 1) * grid_spacing
+                x_offset_initial = 0
+            else:
                 if Y_label_orientation == "Vertical":
-                    border_size_left = border_size_top
+                    bg_width = num_cols * latent_width + (num_cols - 1) * grid_spacing + 3 * border_size_left
+                    x_offset_initial = border_size_left * 3
                 else:  # Assuming Y_label_orientation is "Horizontal"
-                    # border_size_left is now min(latent_width, latent_height) plus 20% of the difference between the two
-                    border_size_left = min(latent_width, latent_height) + int(0.2 * abs(latent_width - latent_height))
-                    border_size_left = int(border_size_left * Y_label_scale)
+                    bg_width = num_cols * latent_width + (num_cols - 1) * grid_spacing + border_size_left
+                    x_offset_initial = border_size_left
 
-                # Modify the border size, background width and x_offset initialization based on Y_type and Y_label_orientation
-                if Y_type == "Nothing":
-                    bg_width = num_cols * latent_width + (num_cols - 1) * grid_spacing
-                    x_offset_initial = 0
-                else:
-                    if Y_label_orientation == "Vertical":
-                        bg_width = num_cols * latent_width + (num_cols - 1) * grid_spacing + 3 * border_size_left
-                        x_offset_initial = border_size_left * 3
-                    else:  # Assuming Y_label_orientation is "Horizontal"
-                        bg_width = num_cols * latent_width + (num_cols - 1) * grid_spacing + border_size_left
-                        x_offset_initial = border_size_left
+            # Modify the background height based on X_type
+            if X_type == "Nothing":
+                bg_height = num_rows * latent_height + (num_rows - 1) * grid_spacing
+                y_offset = 0
+            else:
+                bg_height = num_rows * latent_height + (num_rows - 1) * grid_spacing + 3 * border_size_top
+                y_offset = border_size_top * 3
 
-                # Modify the background height based on X_type
-                if X_type == "Nothing":
-                    bg_height = num_rows * latent_height + (num_rows - 1) * grid_spacing
-                    y_offset = 0
-                else:
-                    bg_height = num_rows * latent_height + (num_rows - 1) * grid_spacing + 3 * border_size_top
-                    y_offset = border_size_top * 3
+            # Create the white background image
+            background = Image.new('RGBA', (int(bg_width), int(bg_height)), color=(255, 255, 255, 255))
 
-                # Create the white background image
-                background = Image.new('RGBA', (int(bg_width), int(bg_height)), color=(255, 255, 255, 255))
+            for row in range(num_rows):
 
-                for row in range(num_rows):
+                # Initialize the X_offset
+                x_offset = x_offset_initial
 
-                    # Initialize the X_offset
-                    x_offset = x_offset_initial
+                for col in range(num_cols):
+                    # Calculate the index for image_pil_list
+                    index = col * num_rows + row
+                    img = image_pil_list[index]
 
-                    for col in range(num_cols):
-                        # Calculate the index for image_pil_list
-                        index = col * num_rows + row
-                        img = image_pil_list[index]
+                    # Paste the image
+                    background.paste(img, (x_offset, y_offset))
 
-                        # Paste the image
-                        background.paste(img, (x_offset, y_offset))
+                    if row == 0 and X_type != "Nothing":
+                        # Assign text
+                        text = X_label[col]
 
-                        if row == 0 and X_type != "Nothing":
-                            # Assign text
-                            text = X_label[col]
+                        # Add the corresponding X_value as a label above the image
+                        initial_font_size = int(48 * img.width / 512)
+                        font_size = adjusted_font_size(text, initial_font_size, img.width)
+                        label_height = int(font_size*1.5)
 
-                            # Add the corresponding X_value as a label above the image
-                            initial_font_size = int(48 * img.width / 512)
-                            font_size = adjusted_font_size(text, initial_font_size, img.width)
-                            label_height = int(font_size*1.5)
+                        # Create a white background label image
+                        label_bg = Image.new('RGBA', (img.width, label_height), color=(255, 255, 255, 0))
+                        d = ImageDraw.Draw(label_bg)
 
-                            # Create a white background label image
-                            label_bg = Image.new('RGBA', (img.width, label_height), color=(255, 255, 255, 0))
-                            d = ImageDraw.Draw(label_bg)
+                        # Create the font object
+                        font = ImageFont.truetype(str(Path(font_path)), font_size)
 
-                            # Create the font object
-                            font = ImageFont.truetype(str(Path(font_path)), font_size)
+                        # Calculate the text size and the starting position
+                        _, _, text_width, text_height = d.textbbox([0,0], text, font=font)
+                        text_x = (img.width - text_width) // 2
+                        text_y = (label_height - text_height) // 2
 
-                            # Calculate the text size and the starting position
-                            _, _, text_width, text_height = d.textbbox([0,0], text, font=font)
-                            text_x = (img.width - text_width) // 2
-                            text_y = (label_height - text_height) // 2
+                        # Add the text to the label image
+                        d.text((text_x, text_y), text, fill='black', font=font)
 
-                            # Add the text to the label image
-                            d.text((text_x, text_y), text, fill='black', font=font)
+                        # Calculate the available space between the top of the background and the top of the image
+                        available_space = y_offset - label_height
 
-                            # Calculate the available space between the top of the background and the top of the image
-                            available_space = y_offset - label_height
+                        # Calculate the new Y position for the label image
+                        label_y = available_space // 2
 
-                            # Calculate the new Y position for the label image
-                            label_y = available_space // 2
+                        # Paste the label image above the image on the background using alpha_composite()
+                        background.alpha_composite(label_bg, (x_offset, label_y))
 
-                            # Paste the label image above the image on the background using alpha_composite()
-                            background.alpha_composite(label_bg, (x_offset, label_y))
+                    if col == 0 and Y_type != "Nothing":
+                        # Assign text
+                        text = Y_label[row]
 
-                        if col == 0 and Y_type != "Nothing":
-                            # Assign text
-                            text = Y_label[row]
+                        # Add the corresponding Y_value as a label to the left of the image
+                        if Y_label_orientation == "Vertical":
+                            initial_font_size = int(48 * latent_width / 512)  # Adjusting this to be same as X_label size
+                            font_size = adjusted_font_size(text, initial_font_size, latent_width)
+                        else:  # Assuming Y_label_orientation is "Horizontal"
+                            initial_font_size = int(48 *  (border_size_left/Y_label_scale) / 512)  # Adjusting this to be same as X_label size
+                            font_size = adjusted_font_size(text, initial_font_size,  int(border_size_left/Y_label_scale))
 
-                            # Add the corresponding Y_value as a label to the left of the image
-                            if Y_label_orientation == "Vertical":
-                                initial_font_size = int(48 * latent_width / 512)  # Adjusting this to be same as X_label size
-                                font_size = adjusted_font_size(text, initial_font_size, latent_width)
-                            else:  # Assuming Y_label_orientation is "Horizontal"
-                                initial_font_size = int(48 *  (border_size_left/Y_label_scale) / 512)  # Adjusting this to be same as X_label size
-                                font_size = adjusted_font_size(text, initial_font_size,  int(border_size_left/Y_label_scale))
+                        # Create a white background label image
+                        label_bg = Image.new('RGBA', (img.height, int(font_size*1.2)), color=(255, 255, 255, 0))
+                        d = ImageDraw.Draw(label_bg)
 
-                            # Create a white background label image
-                            label_bg = Image.new('RGBA', (img.height, int(font_size*1.2)), color=(255, 255, 255, 0))
-                            d = ImageDraw.Draw(label_bg)
+                        # Create the font object
+                        font = ImageFont.truetype(str(Path(font_path)), font_size)
 
-                            # Create the font object
-                            font = ImageFont.truetype(str(Path(font_path)), font_size)
+                        # Calculate the text size and the starting position
+                        _, _, text_width, text_height = d.textbbox([0,0], text, font=font)
+                        text_x = (img.height - text_width) // 2
+                        text_y = (font_size - text_height) // 2
 
-                            # Calculate the text size and the starting position
-                            _, _, text_width, text_height = d.textbbox([0,0], text, font=font)
-                            text_x = (img.height - text_width) // 2
-                            text_y = (font_size - text_height) // 2
+                        # Add the text to the label image
+                        d.text((text_x, text_y), text, fill='black', font=font)
 
-                            # Add the text to the label image
-                            d.text((text_x, text_y), text, fill='black', font=font)
+                        # Rotate the label_bg 90 degrees counter-clockwise only if Y_label_orientation is "Vertical"
+                        if Y_label_orientation == "Vertical":
+                            label_bg = label_bg.rotate(90, expand=True)
 
-                            # Rotate the label_bg 90 degrees counter-clockwise only if Y_label_orientation is "Vertical"
-                            if Y_label_orientation == "Vertical":
-                                label_bg = label_bg.rotate(90, expand=True)
+                        # Calculate the available space between the left of the background and the left of the image
+                        available_space = x_offset - label_bg.width
 
-                            # Calculate the available space between the left of the background and the left of the image
-                            available_space = x_offset - label_bg.width
+                        # Calculate the new X position for the label image
+                        label_x = available_space // 2
 
-                            # Calculate the new X position for the label image
-                            label_x = available_space // 2
+                        # Calculate the Y position for the label image based on its orientation
+                        if Y_label_orientation == "Vertical":
+                            label_y = y_offset + (img.height - label_bg.height) // 2
+                        else:  # Assuming Y_label_orientation is "Horizontal"
+                            label_y = y_offset + img.height - (img.height - label_bg.height) // 2
 
-                            # Calculate the Y position for the label image based on its orientation
-                            if Y_label_orientation == "Vertical":
-                                label_y = y_offset + (img.height - label_bg.height) // 2
-                            else:  # Assuming Y_label_orientation is "Horizontal"
-                                label_y = y_offset + img.height - (img.height - label_bg.height) // 2
+                        # Paste the label image to the left of the image on the background using alpha_composite()
+                        background.alpha_composite(label_bg, (label_x, label_y))
 
-                            # Paste the label image to the left of the image on the background using alpha_composite()
-                            background.alpha_composite(label_bg, (label_x, label_y))
+                    # Update the x_offset
+                    x_offset += img.width + grid_spacing
 
-                        # Update the x_offset
-                        x_offset += img.width + grid_spacing
+                # Update the y_offset
+                y_offset += img.height + grid_spacing
 
-                    # Update the y_offset
-                    y_offset += img.height + grid_spacing
+            xy_plot_image = pil2tensor(background)
 
-                xy_plot_image = pil2tensor(background)
+        # Set xy_plot_flag to 'True' and cache the xy_plot_image tensor
+        update_value_by_id("xy_plot_image", my_unique_id, xy_plot_image)
+        update_value_by_id("xy_plot_flag", my_unique_id, True)
 
-            # Set xy_plot_flag to 'True' and cache the xy_plot_image tensor
-            update_value_by_id("xy_plot_image", my_unique_id, xy_plot_image)
-            update_value_by_id("xy_plot_flag", my_unique_id, True)
+         # Generate the preview_images and cache results
+        preview_images = preview_image(xy_plot_image, filename_prefix)
+        update_value_by_id("preview_images", my_unique_id, preview_images)
 
-             # Generate the preview_images and cache results
-            preview_images = preview_image(xy_plot_image, filename_prefix)
-            update_value_by_id("preview_images", my_unique_id, preview_images)
+        # Generate output_images and cache results
+        output_images = torch.stack([tensor.squeeze() for tensor in image_tensor_list])
+        update_value_by_id("output_images", my_unique_id, output_images)
 
-            # Generate output_images and cache results
-            output_images = torch.stack([tensor.squeeze() for tensor in image_tensor_list])
-            update_value_by_id("output_images", my_unique_id, output_images)
+        # Set the output_image the same as plot image defined by 'xyplot_as_output_image'
+        if xyplot_as_output_image == True:
+            output_images = xy_plot_image
 
-            # Set the output_image the same as plot image defined by 'xyplot_as_output_image'
-            if xyplot_as_output_image == True:
-                output_images = xy_plot_image
+        # Print cache if set to true
+        if cache_models == "True":
+            print_loaded_objects_entries(xyplot_id, prompt)
 
-            # Print cache if set to true
-            if cache_models == "True":
-                print_loaded_objects_entries(script_node_id, prompt)
+        print("-" * 40)  # Print an empty line followed by a separator line
 
-            print("-" * 40)  # Print an empty line followed by a separator line
+        # Set the preview method back to its original state
+        set_preview_method(previous_preview_method)
 
-            # Set the preview method back to its original state
-            set_preview_method(previous_preview_method)
+        if preview_method != "none":
+            # Send message to front-end to revoke the last blob image from browser's memory (fixes preview duplication bug)
+            send_command_to_frontend(startListening=False)
 
-            if preview_method != "none":
-                # Send message to front-end to revoke the last blob image from browser's memory (fixes preview duplication bug)
-                send_command_to_frontend(startListening=False)
-
-            return {"ui": {"images": preview_images},
-                    "result": (model, positive, negative, {"samples": latent_list}, vae, output_images,)}
+        if sampler_type == "sdxl":
+            result = (sdxl_tuple, {"samples": latent_list}, vae, output_images,)
+        else:
+            result = (model, positive, negative, {"samples": latent_list}, vae, output_images,)
+        return {"ui": {"images": preview_images}, "result": result}
 
 #=======================================================================================================================
 # TSC KSampler Adv (Efficient)
@@ -1477,19 +2114,137 @@ class TSC_KSamplerAdvanced(TSC_KSampler):
     RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "LATENT", "VAE", "IMAGE",)
     RETURN_NAMES = ("MODEL", "CONDITIONING+", "CONDITIONING-", "LATENT", "VAE", "IMAGE",)
     OUTPUT_NODE = True
-    FUNCTION = "sampleadv"
+    FUNCTION = "sample_adv"
     CATEGORY = "Efficiency Nodes/Sampling"
 
-    def sampleadv(self, sampler_state, model, add_noise, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative,
+    def sample_adv(self, sampler_state, model, add_noise, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative,
                latent_image, start_at_step, end_at_step, return_with_leftover_noise, preview_method, vae_decode,
                prompt=None, extra_pnginfo=None, my_unique_id=None, optional_vae=(None,), script=None):
 
         return super().sample(sampler_state, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative,
                latent_image, preview_method, vae_decode, denoise=1.0, prompt=prompt, extra_pnginfo=extra_pnginfo, my_unique_id=my_unique_id,
                optional_vae=optional_vae, script=script, add_noise=add_noise, start_at_step=start_at_step,end_at_step=end_at_step,
-                       return_with_leftover_noise=return_with_leftover_noise)
+                       return_with_leftover_noise=return_with_leftover_noise,sampler_type="advanced")
+
+#=======================================================================================================================
+# TSC KSampler SDXL (Efficient)
+class TSC_KSamplerSDXL(TSC_KSampler):
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required":
+                    {"sampler_state": (["Sample", "Hold", "Script"],),
+                     "sdxl_tuple": ("SDXL_TUPLE",),
+                     "noise_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                     "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                     "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
+                     "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
+                     "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
+                     "latent_image": ("LATENT",),
+                     "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
+                     "refine_at_step": ("INT", {"default": -1, "min": -1, "max": 10000}),
+                     "preview_method": (["auto", "latent2rgb", "taesd", "none"],),
+                     "vae_decode": (["true", "true (tiled)", "false", "output only", "output only (tiled)"],),
+                     },
+                "optional": {"optional_vae": ("VAE",),# "refiner_extras": ("REFINER_EXTRAS",),
+                             "script": ("SCRIPT",),},
+                "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO", "my_unique_id": "UNIQUE_ID",},
+                }
+
+    RETURN_TYPES = ("SDXL_TUPLE", "LATENT", "VAE", "IMAGE",)
+    RETURN_NAMES = ("SDXL_TUPLE", "LATENT", "VAE", "IMAGE",)
+    OUTPUT_NODE = True
+    FUNCTION = "sample_sdxl"
+    CATEGORY = "Efficiency Nodes/Sampling"
+
+    def sample_sdxl(self, sampler_state, sdxl_tuple, noise_seed, steps, cfg, sampler_name, scheduler, latent_image,
+               start_at_step, refine_at_step, preview_method, vae_decode, prompt=None, extra_pnginfo=None,
+               my_unique_id=None, optional_vae=(None,), refiner_extras=None, script=None):
+        # sdxl_tuple sent through the 'model' channel
+        # refine_extras sent through the 'positive' channel
+        negative = None
+        return super().sample(sampler_state, sdxl_tuple, noise_seed, steps, cfg, sampler_name, scheduler,
+               refiner_extras, negative, latent_image, preview_method, vae_decode, denoise=1.0,
+               prompt=prompt, extra_pnginfo=extra_pnginfo, my_unique_id=my_unique_id, optional_vae=optional_vae,
+               script=script, add_noise=None, start_at_step=start_at_step, end_at_step=refine_at_step,
+               return_with_leftover_noise=None,sampler_type="sdxl")
+
+#=======================================================================================================================
+# TSC KSampler SDXL Refiner Extras (DISABLED)
+'''
+class TSC_SDXL_Refiner_Extras:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                            "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
+                            "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
+                            "scheduler": (comfy.samplers.KSampler.SCHEDULERS,)}}
+
+    RETURN_TYPES = ("REFINER_EXTRAS",)
+    FUNCTION = "pack_refiner_extras"
+    CATEGORY = "Efficiency Nodes/Misc"
+
+    def pack_refiner_extras(self, seed, cfg, sampler_name, scheduler):
+        return ((seed, cfg, sampler_name, scheduler),)
+'''
 
 ########################################################################################################################
+# Common XY Plot Functions/Variables
+XYPLOT_LIM = 50 #XY Plot default axis size limit
+XYPLOT_DEF = 3  #XY Plot default batch count
+CKPT_EXTENSIONS = LORA_EXTENSIONS = ['.safetensors', '.ckpt']
+VAE_EXTENSIONS = ['.safetensors', '.ckpt', '.pt']
+try:
+    xy_batch_default_path = os.path.abspath(os.sep) + "example_folder"
+except Exception:
+    xy_batch_default_path = ""
+
+def generate_floats(batch_count, first_float, last_float):
+    if batch_count > 1:
+        interval = (last_float - first_float) / (batch_count - 1)
+        return [round(first_float + i * interval, 3) for i in range(batch_count)]
+    else:
+        return [first_float] if batch_count == 1 else []
+
+def generate_ints(batch_count, first_int, last_int):
+    if batch_count > 1:
+        interval = (last_int - first_int) / (batch_count - 1)
+        values = [int(first_int + i * interval) for i in range(batch_count)]
+    else:
+        values = [first_int] if batch_count == 1 else []
+    values = list(set(values))  # Remove duplicates
+    values.sort()  # Sort in ascending order
+    return values
+
+def get_batch_files(directory_path, valid_extensions, include_subdirs=False):
+    batch_files = []
+
+    try:
+        if include_subdirs:
+            # Using os.walk to get files from subdirectories
+            for dirpath, dirnames, filenames in os.walk(directory_path):
+                for file in filenames:
+                    if any(file.endswith(ext) for ext in valid_extensions):
+                        batch_files.append(os.path.join(dirpath, file))
+        else:
+            # Previous code for just the given directory
+            batch_files = [os.path.join(directory_path, f) for f in os.listdir(directory_path) if
+                           os.path.isfile(os.path.join(directory_path, f)) and any(
+                               f.endswith(ext) for ext in valid_extensions)]
+    except Exception as e:
+        print(f"Error while listing files in {directory_path}: {e}")
+
+    return batch_files
+
+def print_xy_values(xy_type, xy_value, xy_name):
+    print("===== XY Value Returns =====")
+    print(f"{xy_name} Values:")
+    print("- Type:", xy_type)
+    print("- Entries:", xy_value)
+    print("============================")
+
+#=======================================================================================================================
 # TSC XY Plot
 class TSC_XYplot:
 
@@ -1500,19 +2255,21 @@ class TSC_XYplot:
                     "XY_flip": (["False","True"],),
                     "Y_label_orientation": (["Horizontal", "Vertical"],),
                     "cache_models": (["True", "False"],),
-                    "ksampler_output_image": (["Plot", "Images"],),},
+                    "ksampler_output_image": (["Images","Plot"],),},
                 "optional": {
                     "dependencies": ("DEPENDENCIES", ),
                     "X": ("XY", ),
                     "Y": ("XY", ),},
+                "hidden": {"my_unique_id": "UNIQUE_ID"},
         }
 
     RETURN_TYPES = ("SCRIPT",)
     RETURN_NAMES = ("SCRIPT",)
     FUNCTION = "XYplot"
-    CATEGORY = "Efficiency Nodes/XY Plot"
+    CATEGORY = "Efficiency Nodes/Scripts"
 
-    def XYplot(self, grid_spacing, XY_flip, Y_label_orientation, cache_models, ksampler_output_image, dependencies=None, X=None, Y=None):
+    def XYplot(self, grid_spacing, XY_flip, Y_label_orientation, cache_models, ksampler_output_image, my_unique_id,
+               dependencies=None, X=None, Y=None):
 
         # Unpack X & Y Tuples if connected
         if X != None:
@@ -1529,22 +2286,31 @@ class TSC_XYplot:
         # If types are the same exit. If one isn't "Nothing", print error
         if (X_type == Y_type):
             if X_type != "Nothing":
-                print(f"\033[31mXY Plot Error:\033[0m X and Y input types must be different.")
+                print(f"{error('XY Plot Error:')} X and Y input types must be different.")
             return (None,)
 
-        # Check that dependencies is connected for Checkpoint and LoRA plots
-        types = ("Checkpoint", "LoRA", "Positive Prompt S/R", "Negative Prompt S/R")
-        if X_type in types or Y_type in types:
-            if dependencies == None: # Not connected
-                print(f"\033[31mXY Plot Error:\033[0m The dependencies input must be connected for certain plot types.")
+        # Check that dependencies are connected for specific plot types
+        encode_types = {
+            "Checkpoint", "Refiner",
+            "LoRA", "LoRA Batch", "LoRA Wt", "LoRA MStr", "LoRA CStr",
+            "Positive Prompt S/R", "Negative Prompt S/R",
+            "AScore+", "AScore-",
+            "Clip Skip", "Clip Skip (Refiner)",
+            "ControlNetStrength", "ControlNetStart%", "ControlNetEnd%"
+        }
+
+        if X_type in encode_types or Y_type in encode_types:
+            if dependencies is None:  # Not connected
+                print(f"{error('XY Plot Error:')} The dependencies input must be connected for certain plot types.")
                 # Return None
                 return (None,)
 
-        # Define X/Y_values for "Seeds++ Batch"
-        if X_type == "Seeds++ Batch":
-            X_value = [i for i in range(X_value[0])]
-        if Y_type == "Seeds++ Batch":
-            Y_value = [i for i in range(Y_value[0])]
+        # Check if both X_type and Y_type are special lora_types
+        lora_types = {"LoRA Batch", "LoRA Wt", "LoRA MStr", "LoRA CStr"}
+        if (X_type in lora_types and Y_type not in lora_types) or (Y_type in lora_types and X_type not in lora_types):
+            print(
+                f"{error('XY Plot Error:')} Both X and Y must be connected to use the 'LoRA Plot' node.")
+            return (None,)
 
         # Clean Schedulers from Sampler data (if other type is Scheduler)
         if X_type == "Sampler" and Y_type == "Scheduler":
@@ -1563,6 +2329,14 @@ class TSC_XYplot:
             # Y_value second tuple value of each array entry = None
             Y_value = [(y, None) for y in Y_value]
 
+        # Clean VAEs from Checkpoint data if other type is VAE
+        if X_type == "Checkpoint" and Y_type == "VAE":
+            # Clear X_value VAE's
+            X_value = [(t[0], t[1], None) for t in X_value]
+        elif Y_type == "VAE" and X_type == "Checkpoint":
+            # Clear Y_value VAE's
+            Y_value = [(t[0], t[1], None) for t in Y_value]
+
         # Flip X and Y
         if XY_flip == "True":
             X_type, Y_type = Y_type, X_type
@@ -1571,8 +2345,11 @@ class TSC_XYplot:
         # Define Ksampler output image behavior
         xyplot_as_output_image = ksampler_output_image == "Plot"
 
-        return ((X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models,
-                 xyplot_as_output_image, dependencies),)
+        # Pack xyplot tuple into its dictionary item under script
+        script = {"xyplot": (X_type, X_value, Y_type, Y_value, grid_spacing, Y_label_orientation, cache_models,
+                        xyplot_as_output_image, my_unique_id, dependencies)}
+
+        return (script,)
 
 #=======================================================================================================================
 # TSC XY Plot: Seeds Values
@@ -1581,19 +2358,19 @@ class TSC_XYplot_SeedsBatch:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "batch_count": ("INT", {"default": 1, "min": 0, "max": 50}),},
+            "batch_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM}),},
         }
 
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
     def xy_value(self, batch_count):
         if batch_count == 0:
             return (None,)
         xy_type = "Seeds++ Batch"
-        xy_value = [batch_count]
+        xy_value = list(range(batch_count))
         return ((xy_type, xy_value),)
 
 #=======================================================================================================================
@@ -1609,7 +2386,7 @@ class TSC_XYplot_AddReturnNoise:
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
     def xy_value(self, XY_type):
         type_mapping = {
@@ -1623,98 +2400,51 @@ class TSC_XYplot_AddReturnNoise:
 #=======================================================================================================================
 # TSC XY Plot: Step Values
 class TSC_XYplot_Steps:
-
+    parameters = ["steps","start_at_step", "end_at_step", "refine_at_step"]
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "batch_count": ("INT", {"default": 0, "min": 0, "max": 50}),
+                "target_parameter": (cls.parameters,),
+                "batch_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM}),
                 "first_step": ("INT", {"default": 10, "min": 1, "max": 10000}),
                 "last_step": ("INT", {"default": 20, "min": 1, "max": 10000}),
-            }
-        }
-
-    RETURN_TYPES = ("XY",)
-    RETURN_NAMES = ("X or Y",)
-    FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
-
-    def xy_value(self, batch_count, first_step, last_step):
-        xy_type = "Steps"
-        if batch_count > 1:
-            interval = (last_step - first_step) / (batch_count - 1)
-            xy_value = [int(first_step + i * interval) for i in range(batch_count)]
-        else:
-            xy_value = [first_step] if batch_count == 1 else []
-        xy_value = list(set(xy_value)) # Remove duplicates
-        xy_value.sort()  # Sort in ascending order
-        if not xy_value:
-            return (None,)
-        return ((xy_type, xy_value),)
-
-#=======================================================================================================================
-# TSC XY Plot: Start at Step Values
-class TSC_XYplot_StartStep:
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "batch_count": ("INT", {"default": 0, "min": 0, "max": 50}),
                 "first_start_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
-                "last_start_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
+                "last_start_step": ("INT", {"default": 10, "min": 0, "max": 10000}),
+                "first_end_step": ("INT", {"default": 10, "min": 0, "max": 10000}),
+                "last_end_step": ("INT", {"default": 20, "min": 0, "max": 10000}),
+                "first_refine_step": ("INT", {"default": 10, "min": 0, "max": 10000}),
+                "last_refine_step": ("INT", {"default": 20, "min": 0, "max": 10000}),
             }
         }
 
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
-    def xy_value(self, batch_count, first_start_step, last_start_step):
-        xy_type = "StartStep"
-        if batch_count > 1:
-            step_increment = (last_start_step - first_start_step) / (batch_count - 1)
-            xy_value = [int(first_start_step + i * step_increment) for i in range(batch_count)]
-        else:
-            xy_value = [first_start_step] if batch_count == 1 else []
-        xy_value = list(set(xy_value))  # Remove duplicates
-        xy_value.sort()  # Sort in ascending order
-        if not xy_value:  # Check if the list is empty
-            return (None,)
-        return ((xy_type, xy_value),)
+    def xy_value(self, target_parameter, batch_count, first_step, last_step, first_start_step, last_start_step,
+                 first_end_step, last_end_step, first_refine_step, last_refine_step):
 
-#=======================================================================================================================
-# TSC XY Plot: End at Step Values
-class TSC_XYplot_EndStep:
+        if target_parameter == "steps":
+            xy_type = "Steps"
+            xy_first = first_step
+            xy_last = last_step
+        elif target_parameter == "start at step":
+            xy_type = "StartStep"
+            xy_first = first_start_step
+            xy_last = last_start_step
+        elif target_parameter == "end_at_step":
+            xy_type = "EndStep"
+            xy_first = first_end_step
+            xy_last = last_end_step
+        elif target_parameter == "refine_at_step":
+            xy_type = "RefineStep"
+            xy_first = first_refine_step
+            xy_last = last_refine_step
 
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "batch_count": ("INT", {"default": 0, "min": 0, "max": 50}),
-                "first_end_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
-                "last_end_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
-            }
-        }
-
-    RETURN_TYPES = ("XY",)
-    RETURN_NAMES = ("X or Y",)
-    FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
-
-    def xy_value(self, batch_count, first_end_step, last_end_step):
-        xy_type = "EndStep"
-        if batch_count > 1:
-            step_increment = (last_end_step - first_end_step) / (batch_count - 1)
-            xy_value = [int(first_end_step + i * step_increment) for i in range(batch_count)]
-        else:
-            xy_value = [first_end_step] if batch_count == 1 else []
-        xy_value = list(set(xy_value))  # Remove duplicates
-        xy_value.sort()  # Sort in ascending order
-        if not xy_value:  # Check if the list is empty
-            return (None,)
-        return ((xy_type, xy_value),)
+        xy_value = generate_ints(batch_count, xy_first, xy_last)
+        return ((xy_type, xy_value),) if xy_value else (None,)
 
 #=======================================================================================================================
 # TSC XY Plot: CFG Values
@@ -1724,100 +2454,65 @@ class TSC_XYplot_CFG:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "batch_count": ("INT", {"default": 0, "min": 0, "max": 50}),
+                "batch_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM}),
                 "first_cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
-                "last_cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
+                "last_cfg": ("FLOAT", {"default": 9.0, "min": 0.0, "max": 100.0}),
             }
         }
 
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
     def xy_value(self, batch_count, first_cfg, last_cfg):
         xy_type = "CFG Scale"
-        if batch_count > 1:
-            interval = (last_cfg - first_cfg) / (batch_count - 1)
-            xy_value = [round(first_cfg + i * interval, 2) for i in range(batch_count)]
-        else:
-            xy_value = [first_cfg] if batch_count == 1 else []
-        if not xy_value:
-            return (None,)
-        return ((xy_type, xy_value),)
+        xy_value = generate_floats(batch_count, first_cfg, last_cfg)
+        return ((xy_type, xy_value),) if xy_value else (None,)
 
 #=======================================================================================================================
-# TSC XY Plot: Sampler Values
-class TSC_XYplot_Sampler:
+# TSC XY Plot: Sampler & Scheduler Values
+class TSC_XYplot_Sampler_Scheduler:
+    parameters = ["sampler", "scheduler", "sampler & scheduler"]
 
     @classmethod
     def INPUT_TYPES(cls):
         samplers = ["None"] + comfy.samplers.KSampler.SAMPLERS
         schedulers = ["None"] + comfy.samplers.KSampler.SCHEDULERS
-        return {"required": {
-                            "sampler_1": (samplers,),
-                            "scheduler_1": (schedulers,),
-                            "sampler_2": (samplers,),
-                            "scheduler_2": (schedulers,),
-                            "sampler_3": (samplers,),
-                            "scheduler_3": (schedulers,),
-                            "sampler_4": (samplers,),
-                            "scheduler_4": (schedulers,),
-                            "sampler_5": (samplers,),
-                            "scheduler_5": (schedulers,),},
-                }
-    RETURN_TYPES = ("XY",)
-    RETURN_NAMES = ("X or Y",)
-    FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
-
-    def xy_value(self, sampler_1, scheduler_1, sampler_2, scheduler_2, sampler_3, scheduler_3,
-                 sampler_4, scheduler_4, sampler_5, scheduler_5):
-
-        samplers = [sampler_1, sampler_2, sampler_3, sampler_4, sampler_5]
-        schedulers = [scheduler_1, scheduler_2, scheduler_3, scheduler_4, scheduler_5]
-
-        pairs = []
-        for sampler, scheduler in zip(samplers, schedulers):
-            if sampler != "None":
-                if scheduler != "None":
-                    pairs.append((sampler, scheduler))
-                else:
-                    pairs.append((sampler,None))
-
-        xy_type = "Sampler"
-        xy_value = pairs
-        if not xy_value:  # Check if the list is empty
-            return (None,)
-        return ((xy_type, xy_value),)
-
-#=======================================================================================================================
-# TSC XY Plot: Scheduler Values
-class TSC_XYplot_Scheduler:
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        schedulers = ["None"] + comfy.samplers.KSampler.SCHEDULERS
-        return {"required": {
-            "scheduler_1": (schedulers,),
-            "scheduler_2": (schedulers,),
-            "scheduler_3": (schedulers,),
-            "scheduler_4": (schedulers,),
-            "scheduler_5": (schedulers,),},
+        inputs = {
+            "required": {
+                "target_parameter": (cls.parameters,),
+                "input_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM, "step": 1})
+            }
         }
+        for i in range(1, XYPLOT_LIM+1):
+            inputs["required"][f"sampler_{i}"] = (samplers,)
+            inputs["required"][f"scheduler_{i}"] = (schedulers,)
+
+        return inputs
 
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
-    def xy_value(self, scheduler_1, scheduler_2, scheduler_3, scheduler_4, scheduler_5):
-        xy_type = "Scheduler"
-        xy_value = [scheduler for scheduler in [scheduler_1, scheduler_2, scheduler_3, scheduler_4, scheduler_5] if
-                      scheduler != "None"]
-        if not xy_value:  # Check if the list is empty
-            return (None,)
-        return ((xy_type, xy_value),)
+    def xy_value(self, target_parameter, input_count, **kwargs):
+        if target_parameter == "scheduler":
+            xy_type = "Scheduler"
+            schedulers = [kwargs.get(f"scheduler_{i}") for i in range(1, input_count + 1)]
+            xy_value = [scheduler for scheduler in schedulers if scheduler != "None"]
+        elif target_parameter == "sampler":
+            xy_type = "Sampler"
+            samplers = [kwargs.get(f"sampler_{i}") for i in range(1, input_count + 1)]
+            xy_value = [(sampler, None) for sampler in samplers if sampler != "None"]
+        else:
+            xy_type = "Sampler"
+            samplers = [kwargs.get(f"sampler_{i}") for i in range(1, input_count + 1)]
+            schedulers = [kwargs.get(f"scheduler_{i}") for i in range(1, input_count + 1)]
+            xy_value = [(sampler, scheduler if scheduler != "None" else None) for sampler,
+            scheduler in zip(samplers, schedulers) if sampler != "None"]
+
+        return ((xy_type, xy_value),) if xy_value else (None,)
 
 #=======================================================================================================================
 # TSC XY Plot: Denoise Values
@@ -1827,7 +2522,7 @@ class TSC_XYplot_Denoise:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "batch_count": ("INT", {"default": 0, "min": 0, "max": 50}),
+                "batch_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM}),
                 "first_denoise": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "last_denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
             }
@@ -1836,158 +2531,171 @@ class TSC_XYplot_Denoise:
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
     def xy_value(self, batch_count, first_denoise, last_denoise):
         xy_type = "Denoise"
-        if batch_count > 1:
-            interval = (last_denoise - first_denoise) / (batch_count - 1)
-            xy_value = [round(first_denoise + i * interval, 2) for i in range(batch_count)]
-        else:
-            xy_value = [first_denoise] if batch_count == 1 else []
-        if not xy_value:
-            return (None,)
-        return ((xy_type, xy_value),)
+        xy_value = generate_floats(batch_count, first_denoise, last_denoise)
+        return ((xy_type, xy_value),) if xy_value else (None,)
 
 #=======================================================================================================================
 # TSC XY Plot: VAE Values
 class TSC_XYplot_VAE:
 
+    modes = ["VAE Names", "VAE Batch"]
+
     @classmethod
     def INPUT_TYPES(cls):
-        vaes = ["None"] + folder_paths.get_filename_list("vae")
-        return {"required": {
-            "vae_name_1": (vaes,),
-            "vae_name_2": (vaes,),
-            "vae_name_3": (vaes,),
-            "vae_name_4": (vaes,),
-            "vae_name_5": (vaes,),},
+
+        vaes = ["None", "Baked VAE"] + folder_paths.get_filename_list("vae")
+
+        inputs = {
+            "required": {
+                        "input_mode": (cls.modes,),
+                        "batch_path": ("STRING", {"default": xy_batch_default_path, "multiline": False}),
+                        "subdirectories": ("BOOLEAN", {"default": False}),
+                        "batch_sort": (["ascending", "descending"],),
+                        "batch_max": ("INT", {"default": -1, "min": -1, "max": XYPLOT_LIM, "step": 1}),
+                        "vae_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM, "step": 1})
+            }
         }
+
+        for i in range(1, XYPLOT_LIM+1):
+            inputs["required"][f"vae_name_{i}"] = (vaes,)
+
+        return inputs
 
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
-    def xy_value(self, vae_name_1, vae_name_2, vae_name_3, vae_name_4, vae_name_5):
+    def xy_value(self, input_mode, batch_path, subdirectories, batch_sort, batch_max, vae_count, **kwargs):
+
         xy_type = "VAE"
-        xy_value = [vae for vae in [vae_name_1, vae_name_2, vae_name_3, vae_name_4, vae_name_5] if vae != "None"]
-        if not xy_value:  # Check if the list is empty
-            return (None,)
-        return ((xy_type, xy_value),)
+
+        if "Batch" not in input_mode:
+            # Extract values from kwargs
+            vaes = [kwargs.get(f"vae_name_{i}") for i in range(1, vae_count + 1)]
+            xy_value = [vae for vae in vaes if vae != "None"]
+        else:
+            if batch_max == 0:
+                return (None,)
+
+            try:
+                vaes = get_batch_files(batch_path, VAE_EXTENSIONS, include_subdirs=subdirectories)
+
+                if not vaes:
+                    print(f"{error('XY Plot Error:')} No VAE files found.")
+                    return (None,)
+
+                if batch_sort == "ascending":
+                    vaes.sort()
+                elif batch_sort == "descending":
+                    vaes.sort(reverse=True)
+
+                # Construct the xy_value using the obtained vaes
+                xy_value = [vae for vae in vaes]
+                
+                if batch_max != -1:  # If there's a limit
+                    xy_value = xy_value[:batch_max]
+
+            except Exception as e:
+                print(f"{error('XY Plot Error:')} {e}")
+                return (None,)
+
+        return ((xy_type, xy_value),) if xy_value else (None,)
 
 #=======================================================================================================================
-# TSC XY Plot: Prompt S/R Positive
-class TSC_XYplot_PromptSR_Positive:
+# TSC XY Plot: Prompt S/R
+class TSC_XYplot_PromptSR:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {
-            "search_txt": ("STRING", {"default": "", "multiline": False}),
-            "replace_count": ("INT", {"default": 0, "min": 0, "max": 4}),
-            "replace_1":("STRING", {"default": "", "multiline": False}),
-            "replace_2": ("STRING", {"default": "", "multiline": False}),
-            "replace_3": ("STRING", {"default": "", "multiline": False}),
-            "replace_4": ("STRING", {"default": "", "multiline": False}),},
+        inputs = {
+            "required": {
+                "target_prompt": (["positive", "negative"],),
+                "search_txt": ("STRING", {"default": "", "multiline": False}),
+                "replace_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM-1}),
+            }
         }
+
+        # Dynamically add replace_X inputs
+        for i in range(1, XYPLOT_LIM):
+            replace_key = f"replace_{i}"
+            inputs["required"][replace_key] = ("STRING", {"default": "", "multiline": False})
+
+        return inputs
 
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
-    def xy_value(self, search_txt, replace_count, replace_1, replace_2, replace_3, replace_4):
-        # If search_txt is empty, return (None,)
+    def xy_value(self, target_prompt, search_txt, replace_count, **kwargs):
         if search_txt == "":
             return (None,)
 
-        xy_type = "Positive Prompt S/R"
-
-        # Create a list of replacement arguments
-        replacements = [replace_1, replace_2, replace_3, replace_4]
+        if target_prompt == "positive":
+            xy_type = "Positive Prompt S/R"
+        elif target_prompt == "negative":
+            xy_type = "Negative Prompt S/R"
 
         # Create base entry
         xy_values = [(search_txt, None)]
 
         if replace_count > 0:
             # Append additional entries based on replace_count
-            xy_values.extend([(search_txt, replacements[i]) for i in range(replace_count)])
+            xy_values.extend([(search_txt, kwargs.get(f"replace_{i+1}")) for i in range(replace_count)])
 
         return ((xy_type, xy_values),)
 
 #=======================================================================================================================
-# TSC XY Plot: Prompt S/R Negative
-class TSC_XYplot_PromptSR_Negative:
+# TSC XY Plot: Aesthetic Score
+class TSC_XYplot_AScore:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {
-            "search_txt": ("STRING", {"default": "", "multiline": False}),
-            "replace_count": ("INT", {"default": 0, "min": 0, "max": 4}),
-            "replace_1":("STRING", {"default": "", "multiline": False}),
-            "replace_2": ("STRING", {"default": "", "multiline": False}),
-            "replace_3": ("STRING", {"default": "", "multiline": False}),
-            "replace_4": ("STRING", {"default": "", "multiline": False}),},
+        return {
+            "required": {
+                "target_ascore": (["positive", "negative"],),
+                "batch_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM}),
+                "first_ascore": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
+                "last_ascore": ("FLOAT", {"default": 10.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
+            }
         }
 
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
-    def xy_value(self, search_txt, replace_count, replace_1, replace_2, replace_3, replace_4):
-        # If search_txt is empty, return (None,)
-        if search_txt == "":
-            return (None,)
-
-        xy_type = "Negative Prompt S/R"
-
-        # Create a list of replacement arguments
-        replacements = [replace_1, replace_2, replace_3, replace_4]
-
-        # Create base entry
-        xy_values = [(search_txt, None)]
-
-        if replace_count > 0:
-            # Append additional entries based on replace_count
-            xy_values.extend([(search_txt, replacements[i]) for i in range(replace_count)])
-
-        return ((xy_type, xy_values),)
+    def xy_value(self, target_ascore, batch_count, first_ascore, last_ascore):
+        if target_ascore == "positive":
+            xy_type = "AScore+"
+        else:
+            xy_type = "AScore-"
+        xy_value = generate_floats(batch_count, first_ascore, last_ascore)
+        return ((xy_type, xy_value),) if xy_value else (None,)
 
 #=======================================================================================================================
-# TSC XY Plot: Checkpoint Values
-class TSC_XYplot_Checkpoint:
+# TSC XY Plot: Refiner On/Off
+class TSC_XYplot_Refiner_OnOff:
 
     @classmethod
     def INPUT_TYPES(cls):
-        checkpoints = ["None"] + folder_paths.get_filename_list("checkpoints")
         return {"required": {
-            "ckpt_name_1": (checkpoints,),
-            "clip_skip1": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
-            "ckpt_name_2": (checkpoints,),
-            "clip_skip2": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
-            "ckpt_name_3": (checkpoints,),
-            "clip_skip3": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
-            "ckpt_name_4": (checkpoints,),
-            "clip_skip4": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
-            "ckpt_name_5": (checkpoints,),
-            "clip_skip5": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),},
+                    "refine_at_percent": ("FLOAT",{"default": 0.80, "min": 0.00, "max": 1.00, "step": 0.01})},
         }
 
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
-    def xy_value(self, ckpt_name_1, clip_skip1, ckpt_name_2, clip_skip2, ckpt_name_3, clip_skip3,
-                 ckpt_name_4, clip_skip4, ckpt_name_5, clip_skip5):
-        xy_type = "Checkpoint"
-        checkpoints = [ckpt_name_1, ckpt_name_2, ckpt_name_3, ckpt_name_4, ckpt_name_5]
-        clip_skips = [clip_skip1, clip_skip2, clip_skip3, clip_skip4, clip_skip5]
-        xy_value = [(checkpoint, clip_skip) for checkpoint, clip_skip in zip(checkpoints, clip_skips) if
-                    checkpoint != "None"]
-        if not xy_value:  # Check if the list is empty
-            return (None,)
+    def xy_value(self, refine_at_percent):
+        xy_type = "Refiner On/Off"
+        xy_value = [refine_at_percent, 1]
         return ((xy_type, xy_value),)
 
 #=======================================================================================================================
@@ -1998,113 +2706,333 @@ class TSC_XYplot_ClipSkip:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "batch_count": ("INT", {"default": 0, "min": 0, "max": 50}),
+                "target_ckpt": (["Base","Refiner"],),
+                "batch_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM}),
                 "first_clip_skip": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
-                "last_clip_skip": ("INT", {"default": -2, "min": -24, "max": -1, "step": 1}),
+                "last_clip_skip": ("INT", {"default": -3, "min": -24, "max": -1, "step": 1}),
             },
         }
 
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
-    def xy_value(self, batch_count, first_clip_skip, last_clip_skip):
-        xy_type = "Clip Skip"
-        if batch_count > 1:
-            clip_skip_increment = (last_clip_skip - first_clip_skip) / (batch_count - 1)
-            xy_value = [int(first_clip_skip + i * clip_skip_increment) for i in range(batch_count)]
+    def xy_value(self, target_ckpt, batch_count, first_clip_skip, last_clip_skip):
+        if target_ckpt == "Base":
+            xy_type = "Clip Skip"
         else:
-            xy_value = [first_clip_skip] if batch_count == 1 else []
-        xy_value = list(set(xy_value))  # Remove duplicates
-        xy_value.sort()  # Sort in ascending order
-        if not xy_value:  # Check if the list is empty
-            return (None,)
-        return ((xy_type, xy_value),)
+            xy_type = "Clip Skip (Refiner)"
+        xy_value = generate_ints(batch_count, first_clip_skip, last_clip_skip)
+        return ((xy_type, xy_value),) if xy_value else (None,)
 
 #=======================================================================================================================
-# TSC XY Plot: LoRA Values
-class TSC_XYplot_LoRA:
-
+# TSC XY Plot: Checkpoint Values
+class TSC_XYplot_Checkpoint:
+    modes = ["Ckpt Names", "Ckpt Names+ClipSkip", "Ckpt Names+ClipSkip+VAE", "Checkpoint Batch"]
     @classmethod
     def INPUT_TYPES(cls):
-        loras = ["None"] + folder_paths.get_filename_list("loras")
-        return {"required": {
-                            "model_strengths": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "clip_strengths": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "lora_name_1": (loras,),
-                            "lora_name_2": (loras,),
-                            "lora_name_3": (loras,),
-                            "lora_name_4": (loras,),
-                            "lora_name_5": (loras,)},
-                "optional": {"lora_stack": ("LORA_STACK", )}
-                }
+        checkpoints = ["None"] + folder_paths.get_filename_list("checkpoints")
+        vaes = ["Baked VAE"] + folder_paths.get_filename_list("vae")
+
+        inputs = {
+            "required": {
+                        "target_ckpt": (["Base", "Refiner"],),
+                        "input_mode": (cls.modes,),
+                        "batch_path": ("STRING", {"default": xy_batch_default_path, "multiline": False}),
+                        "subdirectories": ("BOOLEAN", {"default": False}),
+                        "batch_sort": (["ascending", "descending"],),
+                        "batch_max": ("INT", {"default": -1, "min": -1, "max": 50, "step": 1}),
+                        "ckpt_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM, "step": 1})
+            }
+        }
+
+        for i in range(1, XYPLOT_LIM+1):
+            inputs["required"][f"ckpt_name_{i}"] = (checkpoints,)
+            inputs["required"][f"clip_skip_{i}"] = ("INT", {"default": -1, "min": -24, "max": -1, "step": 1})
+            inputs["required"][f"vae_name_{i}"] = (vaes,)
+
+        return inputs
 
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
-    def xy_value(self, model_strengths, clip_strengths, lora_name_1, lora_name_2, lora_name_3, lora_name_4, lora_name_5,
-                 lora_stack=None):
-        xy_type = "LoRA"
-        loras = [lora_name_1, lora_name_2, lora_name_3, lora_name_4, lora_name_5]
+    def xy_value(self, target_ckpt, input_mode, batch_path, subdirectories, batch_sort, batch_max, ckpt_count, **kwargs):
 
-        # Extend each sub-array with lora_stack if it's not None
-        xy_value = [[(lora, model_strengths, clip_strengths)] + (lora_stack if lora_stack else []) for lora in loras if
-                    lora != "None"]
+        # Define XY type
+        xy_type = "Checkpoint" if target_ckpt == "Base" else "Refiner"
 
-        if not xy_value:  # Check if the list is empty
-            return (None,)
-        return ((xy_type, xy_value),)
+        if "Batch" not in input_mode:
+            # Extract values from kwargs
+            checkpoints = [kwargs.get(f"ckpt_name_{i}") for i in range(1, ckpt_count + 1)]
+            clip_skips = [kwargs.get(f"clip_skip_{i}") for i in range(1, ckpt_count + 1)]
+            vaes = [kwargs.get(f"vae_name_{i}") for i in range(1, ckpt_count + 1)]
+
+            # Set None for Clip Skip and/or VAE if not correct modes
+            for i in range(ckpt_count):
+                if "ClipSkip" not in input_mode:
+                    clip_skips[i] = None
+                if "VAE" not in input_mode:
+                    vaes[i] = None
+
+            xy_value = [(checkpoint, clip_skip, vae) for checkpoint, clip_skip, vae in zip(checkpoints, clip_skips, vaes) if
+                        checkpoint != "None"]
+        else:
+            if batch_max == 0:
+                return (None,)
+
+            try:
+                ckpts = get_batch_files(batch_path, CKPT_EXTENSIONS, include_subdirs=subdirectories)
+
+                if not ckpts:
+                    print(f"{error('XY Plot Error:')} No Checkpoint files found.")
+                    return (None,)
+
+                if batch_sort == "ascending":
+                    ckpts.sort()
+                elif batch_sort == "descending":
+                    ckpts.sort(reverse=True)
+
+                # Construct the xy_value using the obtained ckpts
+                xy_value = [(ckpt, None, None) for ckpt in ckpts]
+
+                if batch_max != -1:  # If there's a limit
+                    xy_value = xy_value[:batch_max]
+
+            except Exception as e:
+                print(f"{error('XY Plot Error:')} {e}")
+                return (None,)
+
+        return ((xy_type, xy_value),) if xy_value else (None,)
 
 #=======================================================================================================================
-# TSC XY Plot: LoRA Advanced
-class TSC_XYplot_LoRA_Adv:
+# TSC XY Plot: LoRA Batch (DISABLED)
+class TSC_XYplot_LoRA_Batch:
 
     @classmethod
     def INPUT_TYPES(cls):
-        loras = ["None"] + folder_paths.get_filename_list("loras")
+
         return {"required": {
-                            "lora_name_1": (loras,),
-                            "model_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "clip_str_1": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "lora_name_2": (loras,),
-                            "model_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "clip_str_2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "lora_name_3": (loras,),
-                            "model_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "clip_str_3": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "lora_name_4": (loras,),
-                            "model_str_4": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "clip_str_4": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "lora_name_5": (loras,),
-                            "model_str_5": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                            "clip_str_5": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),},
+                "batch_path": ("STRING", {"default": xy_batch_default_path, "multiline": False}),
+                "subdirectories": ("BOOLEAN", {"default": False}),
+                "batch_sort": (["ascending", "descending"],),
+                "batch_max": ("INT",{"default": -1, "min": -1, "max": XYPLOT_LIM, "step": 1}),
+                "model_strength": ("FLOAT", {"default": 1.0, "min": -10.00, "max": 10.0, "step": 0.01}),
+                "clip_strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})},
                 "optional": {"lora_stack": ("LORA_STACK",)}
         }
 
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
-    def xy_value(self, lora_name_1, model_str_1, clip_str_1, lora_name_2, model_str_2, clip_str_2, lora_name_3,
-                 model_str_3,
-                 clip_str_3, lora_name_4, model_str_4, clip_str_4, lora_name_5, model_str_5, clip_str_5,
-                 lora_stack=None):
-        xy_type = "LoRA"
-        loras = [lora_name_1, lora_name_2, lora_name_3, lora_name_4, lora_name_5]
-        model_strs = [model_str_1, model_str_2, model_str_3, model_str_4, model_str_5]
-        clip_strs = [clip_str_1, clip_str_2, clip_str_3, clip_str_4, clip_str_5]
-
-        # Extend each sub-array with lora_stack if it's not None
-        xy_value = [[(lora, model_str, clip_str)] + (lora_stack if lora_stack else []) for lora, model_str, clip_str in
-                    zip(loras, model_strs, clip_strs) if lora != "None"]
-
-        if not xy_value:  # Check if the list is empty
+    def xy_value(self, batch_path, subdirectories, batch_sort, model_strength, clip_strength, batch_max, lora_stack=None):
+        if batch_max == 0:
             return (None,)
-        return ((xy_type, xy_value),)
+
+        xy_type = "LoRA"
+
+        loras = get_batch_files(batch_path, LORA_EXTENSIONS, include_subdirs=subdirectories)
+
+        if not loras:
+            print(f"{error('XY Plot Error:')} No LoRA files found.")
+            return (None,)
+
+        if batch_sort == "ascending":
+            loras.sort()
+        elif batch_sort == "descending":
+            loras.sort(reverse=True)
+
+        # Construct the xy_value using the obtained loras
+        xy_value = [[(lora, model_strength, clip_strength)] + (lora_stack if lora_stack else []) for lora in loras]
+
+        if batch_max != -1:  # If there's a limit
+            xy_value = xy_value[:batch_max]
+
+        return ((xy_type, xy_value),) if xy_value else (None,)
+
+#=======================================================================================================================
+# TSC XY Plot: LoRA Values
+class TSC_XYplot_LoRA:
+    modes = ["LoRA Names", "LoRA Names+Weights", "LoRA Batch"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        loras = ["None"] + folder_paths.get_filename_list("loras")
+
+        inputs = {
+            "required": {
+                "input_mode": (cls.modes,),
+                "batch_path": ("STRING", {"default": xy_batch_default_path, "multiline": False}),
+                "subdirectories": ("BOOLEAN", {"default": False}),
+                "batch_sort": (["ascending", "descending"],),
+                "batch_max": ("INT", {"default": -1, "min": -1, "max": XYPLOT_LIM, "step": 1}),
+                "lora_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM, "step": 1}),
+                "model_strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                "clip_strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            }
+        }
+
+        for i in range(1, XYPLOT_LIM+1):
+            inputs["required"][f"lora_name_{i}"] = (loras,)
+            inputs["required"][f"model_str_{i}"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})
+            inputs["required"][f"clip_str_{i}"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})
+
+        inputs["optional"] = {
+            "lora_stack": ("LORA_STACK",)
+        }
+        return inputs
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
+
+    def __init__(self):
+        self.lora_batch = TSC_XYplot_LoRA_Batch()
+
+    def xy_value(self, input_mode, batch_path, subdirectories, batch_sort, batch_max, lora_count, model_strength,
+                 clip_strength, lora_stack=None, **kwargs):
+
+        xy_type = "LoRA"
+        result = (None,)
+        lora_stack = lora_stack if lora_stack else []
+
+        if "Batch" not in input_mode:
+            # Extract values from kwargs
+            loras = [kwargs.get(f"lora_name_{i}") for i in range(1, lora_count + 1)]
+            model_strs = [kwargs.get(f"model_str_{i}", model_strength) for i in range(1, lora_count + 1)]
+            clip_strs = [kwargs.get(f"clip_str_{i}", clip_strength) for i in range(1, lora_count + 1)]
+
+            # Use model_strength and clip_strength for the loras where values are not provided
+            if "Weights" not in input_mode:
+                for i in range(lora_count):
+                    model_strs[i] = model_strength
+                    clip_strs[i] = clip_strength
+
+            # Extend each sub-array with lora_stack if it's not None
+            xy_value = [[(lora, model_str, clip_str)] + lora_stack for lora, model_str, clip_str
+                        in zip(loras, model_strs, clip_strs) if lora != "None"]
+
+            result = ((xy_type, xy_value),)
+        else:
+            try:
+                result = self.lora_batch.xy_value(batch_path, subdirectories, batch_sort, model_strength,
+                                                  clip_strength, batch_max, lora_stack)
+            except Exception as e:
+                print(f"{error('XY Plot Error:')} {e}")
+
+        return result
+
+#=======================================================================================================================
+# TSC XY Plot: LoRA Plot
+class TSC_XYplot_LoRA_Plot:
+
+    modes = ["X: LoRA Batch, Y: LoRA Weight",
+             "X: LoRA Batch, Y: Model Strength",
+             "X: LoRA Batch, Y: Clip Strength",
+             "X: Model Strength, Y: Clip Strength",
+            ]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        loras = ["None"] + folder_paths.get_filename_list("loras")
+        return {"required": {
+                "input_mode": (cls.modes,),
+                "lora_name": (loras,),
+                "model_strength": ("FLOAT", {"default": 1.0, "min": -10.00, "max": 10.0, "step": 0.01}),
+                "clip_strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                "X_batch_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM}),
+                "X_batch_path": ("STRING", {"default": xy_batch_default_path, "multiline": False}),
+                "X_subdirectories": ("BOOLEAN", {"default": False}),
+                "X_batch_sort": (["ascending", "descending"],),
+                "X_first_value": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 10.0, "step": 0.01}),
+                "X_last_value": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 10.0, "step": 0.01}),
+                "Y_batch_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM}),
+                "Y_first_value": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 10.0, "step": 0.01}),
+                "Y_last_value": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 10.0, "step": 0.01}),},
+            "optional": {"lora_stack": ("LORA_STACK",)}
+        }
+
+    RETURN_TYPES = ("XY","XY",)
+    RETURN_NAMES = ("X","Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
+
+    def __init__(self):
+        self.lora_batch = TSC_XYplot_LoRA_Batch()
+
+    def generate_values(self, mode, X_or_Y, *args, **kwargs):
+        result = self.lora_batch.xy_value(*args, **kwargs)
+
+        if result and result[0]:
+            xy_type, xy_value_list = result[0]
+
+            # Adjust type based on the mode
+            if "LoRA Weight" in mode:
+                xy_type = "LoRA Wt"
+            elif "Model Strength" in mode:
+                xy_type = "LoRA MStr"
+            elif "Clip Strength" in mode:
+                xy_type = "LoRA CStr"
+
+            # Check whether the value is for X or Y
+            if "LoRA Batch" in mode: # Changed condition
+                return self.generate_batch_values(*args, **kwargs)
+            else:
+                return ((xy_type, xy_value_list),)
+
+        return (None,)
+
+    def xy_value(self, input_mode, lora_name, model_strength, clip_strength, X_batch_count, X_batch_path, X_subdirectories,
+                 X_batch_sort, X_first_value, X_last_value, Y_batch_count, Y_first_value, Y_last_value, lora_stack=None):
+
+        x_value, y_value = [], []
+        lora_stack = lora_stack if lora_stack else []
+
+        if "Model Strength" in input_mode and "Clip Strength" in input_mode:
+            if lora_name == 'None':
+                return (None,None,)
+        if "LoRA Batch" in input_mode:
+            lora_name = None
+        if "LoRA Weight" in input_mode:
+            model_strength = None
+            clip_strength = None
+        if "Model Strength" in input_mode:
+            model_strength = None
+        if "Clip Strength" in input_mode:
+            clip_strength = None
+
+        # Handling X values
+        if "X: LoRA Batch" in input_mode:
+            try:
+                x_value = self.lora_batch.xy_value(X_batch_path, X_subdirectories, X_batch_sort,
+                                                   model_strength, clip_strength, X_batch_count, lora_stack)[0][1]
+            except Exception as e:
+                print(f"{error('XY Plot Error:')} {e}")
+                return (None,)
+            x_type = "LoRA Batch"
+        elif "X: Model Strength" in input_mode:
+            x_floats = generate_floats(X_batch_count, X_first_value, X_last_value)
+            x_type = "LoRA MStr"
+            x_value = [[(lora_name, x, clip_strength)] + lora_stack for x in x_floats]
+
+        # Handling Y values
+        y_floats = generate_floats(Y_batch_count, Y_first_value, Y_last_value)
+        if "Y: LoRA Weight" in input_mode:
+            y_type = "LoRA Wt"
+            y_value = [[(lora_name, y, y)] + lora_stack for y in y_floats]
+        elif "Y: Model Strength" in input_mode:
+            y_type = "LoRA MStr"
+            y_value = [[(lora_name, y, clip_strength)] + lora_stack for y in y_floats]
+        elif "Y: Clip Strength" in input_mode:
+            y_type = "LoRA CStr"
+            y_value = [[(lora_name, model_strength, y)] + lora_stack for y in y_floats]
+
+        return ((x_type, x_value), (y_type, y_value))
 
 #=======================================================================================================================
 # TSC XY Plot: LoRA Stacks
@@ -2113,7 +3041,7 @@ class TSC_XYplot_LoRA_Stacks:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-                    "node_state": (["Enabled", "Disabled"],)},
+                    "node_state": (["Enabled"],)},
                 "optional": {
                     "lora_stack_1": ("LORA_STACK",),
                     "lora_stack_2": ("LORA_STACK",),
@@ -2125,7 +3053,7 @@ class TSC_XYplot_LoRA_Stacks:
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
     def xy_value(self, node_state, lora_stack_1=None, lora_stack_2=None, lora_stack_3=None, lora_stack_4=None, lora_stack_5=None):
         xy_type = "LoRA"
@@ -2136,8 +3064,8 @@ class TSC_XYplot_LoRA_Stacks:
             return ((xy_type, xy_value),)
 
 #=======================================================================================================================
-# TSC XY Plot: Control_Net_Strengths
-class TSC_XYplot_Control_Net_Strengths:
+# TSC XY Plot: Control Net Strength (DISABLED)
+class TSC_XYplot_Control_Net_Strength:
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -2145,9 +3073,11 @@ class TSC_XYplot_Control_Net_Strengths:
             "required": {
                 "control_net": ("CONTROL_NET",),
                 "image": ("IMAGE",),
-                "batch_count": ("INT", {"default": 0, "min": 0, "max": 50}),
-                "first_strength": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 1.0, "step": 0.01}),
-                "last_strength": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "batch_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM}),
+                "first_strength": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 10.0, "step": 0.01}),
+                "last_strength": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 10.0, "step": 0.01}),
+                "start_percent": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
             },
             "optional": {"cnet_stack": ("CONTROL_NET_STACK",)},
         }
@@ -2155,12 +3085,30 @@ class TSC_XYplot_Control_Net_Strengths:
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
-    def xy_value(self, control_net, image, batch_count, first_strength, last_strength, cnet_stack=None):
-        xy_type = "ControlNetStr"
+    def xy_value(self, control_net, image, batch_count, first_strength, last_strength,
+                 start_percent, end_percent, cnet_stack=None):
+
+        if batch_count == 0:
+            return (None,)
+
+        xy_type = "ControlNetStrength"
         strength_increment = (last_strength - first_strength) / (batch_count - 1) if batch_count > 1 else 0
-        xy_value = [[(control_net, image, first_strength + i * strength_increment)] for i in range(batch_count)]
+
+        xy_value = []
+
+        # Always add the first strength.
+        xy_value.append([(control_net, image, first_strength, start_percent, end_percent)])
+
+        # Add intermediate strengths only if batch_count is more than 2.
+        for i in range(1, batch_count - 1):
+            xy_value.append([(control_net, image, first_strength + i * strength_increment, start_percent,
+                              end_percent)])
+
+        # Always add the last strength if batch_count is more than 1.
+        if batch_count > 1:
+            xy_value.append([(control_net, image, last_strength, start_percent, end_percent)])
 
         # If cnet_stack is provided, extend each inner array with its content
         if cnet_stack:
@@ -2168,6 +3116,265 @@ class TSC_XYplot_Control_Net_Strengths:
                 inner_list.extend(cnet_stack)
 
         return ((xy_type, xy_value),)
+
+#=======================================================================================================================
+# TSC XY Plot: Control Net Start % (DISABLED)
+class TSC_XYplot_Control_Net_Start:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "control_net": ("CONTROL_NET",),
+                "image": ("IMAGE",),
+                "batch_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM}),
+                "first_start_percent": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "last_start_percent": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 10.0, "step": 0.01}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+            },
+            "optional": {"cnet_stack": ("CONTROL_NET_STACK",)},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
+
+    def xy_value(self, control_net, image, batch_count, first_start_percent, last_start_percent,
+                 strength, end_percent, cnet_stack=None):
+
+        if batch_count == 0:
+            return (None,)
+
+        xy_type = "ControlNetStart%"
+        percent_increment = (last_start_percent - first_start_percent) / (batch_count - 1) if batch_count > 1 else 0
+
+        xy_value = []
+
+        # Always add the first start_percent.
+        xy_value.append([(control_net, image, strength, first_start_percent, end_percent)])
+
+        # Add intermediate start percents only if batch_count is more than 2.
+        for i in range(1, batch_count - 1):
+            xy_value.append([(control_net, image, strength, first_start_percent + i * percent_increment,
+                              end_percent)])
+
+        # Always add the last start_percent if batch_count is more than 1.
+        if batch_count > 1:
+            xy_value.append([(control_net, image, strength, last_start_percent, end_percent)])
+
+        # If cnet_stack is provided, extend each inner array with its content
+        if cnet_stack:
+            for inner_list in xy_value:
+                inner_list.extend(cnet_stack)
+
+        return ((xy_type, xy_value),)
+
+#=======================================================================================================================
+# TSC XY Plot: Control Net End % (DISABLED)
+class TSC_XYplot_Control_Net_End:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "control_net": ("CONTROL_NET",),
+                "image": ("IMAGE",),
+                "batch_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM}),
+                "first_end_percent": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "last_end_percent": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 10.0, "step": 0.01}),
+                "start_percent": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+            },
+            "optional": {"cnet_stack": ("CONTROL_NET_STACK",)},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
+
+    def xy_value(self, control_net, image, batch_count, first_end_percent, last_end_percent,
+                 strength, start_percent, cnet_stack=None):
+
+        if batch_count == 0:
+            return (None,)
+        
+        xy_type = "ControlNetEnd%"
+        percent_increment = (last_end_percent - first_end_percent) / (batch_count - 1) if batch_count > 1 else 0
+
+        xy_value = []
+
+        # Always add the first end_percent.
+        xy_value.append([(control_net, image, strength, start_percent, first_end_percent)])
+
+        # Add intermediate end percents only if batch_count is more than 2.
+        for i in range(1, batch_count - 1):
+            xy_value.append([(control_net, image, strength, start_percent,
+                              first_end_percent + i * percent_increment)])
+
+        # Always add the last end_percent if batch_count is more than 1.
+        if batch_count > 1:
+            xy_value.append([(control_net, image, strength, start_percent, last_end_percent)])
+
+        # If cnet_stack is provided, extend each inner array with its content
+        if cnet_stack:
+            for inner_list in xy_value:
+                inner_list.extend(cnet_stack)
+
+        return ((xy_type, xy_value),)
+
+
+# =======================================================================================================================
+# TSC XY Plot: Control Net
+class TSC_XYplot_Control_Net:
+    parameters = ["strength", "start_percent", "end_percent"]
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "control_net": ("CONTROL_NET",),
+                "image": ("IMAGE",),
+                "target_parameter": (cls.parameters,),
+                "batch_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM}),
+                "first_strength": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 10.0, "step": 0.01}),
+                "last_strength": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 10.0, "step": 0.01}),
+                "first_start_percent": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "last_start_percent": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "first_end_percent": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "last_end_percent": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 10.0, "step": 0.01}),
+                "start_percent": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+            },
+            "optional": {"cnet_stack": ("CONTROL_NET_STACK",)},
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
+
+    def xy_value(self, control_net, image, target_parameter, batch_count, first_strength, last_strength, first_start_percent,
+                 last_start_percent, first_end_percent, last_end_percent, strength, start_percent, cnet_stack=None):
+
+
+        return ((xy_type, xy_value),)
+
+#=======================================================================================================================
+# TSC XY Plot: Control Net Plot
+class TSC_XYplot_Control_Net_Plot:
+
+    plot_types = ["X: Strength, Y: Start%",
+             "X: Strength, Y: End%",
+             "X: Start%, Y: Strength",
+             "X: Start%, Y: End%",
+             "X: End%, Y: Strength",
+             "X: End%, Y: Start%"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+
+        return {
+            "required": {
+                "control_net": ("CONTROL_NET",),
+                "image": ("IMAGE",),
+                "plot_type": (cls.plot_types,),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "start_percent": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "X_batch_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM}),
+                "X_first_value": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 10.0, "step": 0.01}),
+                "X_last_value": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 10.0, "step": 0.01}),
+                "Y_batch_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM}),
+                "Y_first_value": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 10.0, "step": 0.01}),
+                "Y_last_value": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 10.0, "step": 0.01}),},
+            "optional": {"cnet_stack": ("CONTROL_NET_STACK",)},
+        }
+
+    RETURN_TYPES = ("XY","XY",)
+    RETURN_NAMES = ("X","Y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
+
+    def get_value(self, axis, control_net, image, strength, start_percent, end_percent,
+                  batch_count, first_value, last_value):
+
+        # Adjust upper bound for Start% and End% type
+        if axis in ["Start%", "End%"]:
+            first_value = min(1, first_value)
+            last_value = min(1, last_value)
+
+        increment = (last_value - first_value) / (batch_count - 1) if batch_count > 1 else 0
+
+        values = []
+
+        # Always add the first value.
+        if axis == "Strength":
+            values.append([(control_net, image, first_value, start_percent, end_percent)])
+        elif axis == "Start%":
+            values.append([(control_net, image, strength, first_value, end_percent)])
+        elif axis == "End%":
+            values.append([(control_net, image, strength, start_percent, first_value)])
+
+        # Add intermediate values only if batch_count is more than 2.
+        for i in range(1, batch_count - 1):
+            if axis == "Strength":
+                values.append(
+                    [(control_net, image, first_value + i * increment, start_percent, end_percent)])
+            elif axis == "Start%":
+                values.append(
+                    [(control_net, image, strength, first_value + i * increment, end_percent)])
+            elif axis == "End%":
+                values.append(
+                    [(control_net, image, strength, start_percent, first_value + i * increment)])
+
+        # Always add the last value if batch_count is more than 1.
+        if batch_count > 1:
+            if axis == "Strength":
+                values.append([(control_net, image, last_value, start_percent, end_percent)])
+            elif axis == "Start%":
+                values.append([(control_net, image, strength, last_value, end_percent)])
+            elif axis == "End%":
+                values.append([(control_net, image, strength, start_percent, last_value)])
+
+        return values
+
+    def xy_value(self, control_net, image, strength, start_percent, end_percent, plot_type,
+                 X_batch_count, X_first_value, X_last_value, Y_batch_count, Y_first_value, Y_last_value,
+                 cnet_stack=None):
+
+        x_type, y_type = plot_type.split(", ")
+
+        # Now split each type by ": "
+        x_type = x_type.split(": ")[1].strip()
+        y_type = y_type.split(": ")[1].strip()
+
+        x_entry = None
+        y_entry = None
+
+        if X_batch_count > 0:
+            x_value = self.get_value(x_type, control_net, image, strength, start_percent,
+                                     end_percent, X_batch_count, X_first_value, X_last_value)
+            # If cnet_stack is provided, extend each inner array with its content
+            if cnet_stack:
+                for inner_list in x_value:
+                    inner_list.extend(cnet_stack)
+
+            x_entry = ("ControlNet" + x_type, x_value)
+
+        if Y_batch_count > 0:
+            y_value = self.get_value(y_type, control_net, image, strength, start_percent,
+                                     end_percent, Y_batch_count, Y_first_value, Y_last_value)
+            # If cnet_stack is provided, extend each inner array with its content
+            if cnet_stack:
+                for inner_list in y_value:
+                    inner_list.extend(cnet_stack)
+
+            y_entry = ("ControlNet" + y_type, y_value)
+
+        return (x_entry, y_entry,)
 
 #=======================================================================================================================
 # TSC XY Plot: Manual Entry Notes
@@ -2212,44 +3419,35 @@ class TSC_XYplot_Manual_XY_Entry_Info:
                                     f"_____________LORAS______________\n{loras}\n","multiline": True}),},}
 
     RETURN_TYPES = ()
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
+
 
 #=======================================================================================================================
 # TSC XY Plot: Manual Entry
 class TSC_XYplot_Manual_XY_Entry:
 
+    plot_types = ["Nothing", "Seeds++ Batch", "Steps", "StartStep", "EndStep", "CFG Scale", "Sampler", "Scheduler",
+                  "Denoise", "VAE", "Positive Prompt S/R", "Negative Prompt S/R", "Checkpoint", "Clip Skip", "LoRA"]
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "X_type": (["Nothing", "Seeds++ Batch", "Steps", "StartStep", "EndStep", "CFG Scale",
-                        "Sampler", "Scheduler", "Denoise", "VAE",
-                        "Positive Prompt S/R", "Negative Prompt S/R", "Checkpoint", "Clip Skip", "LoRA"],),
-            "X_value": ("STRING", {"default": "", "multiline": True}),
-            "Y_type": (["Nothing", "Seeds++ Batch", "Steps", "StartStep", "EndStep", "CFG Scale",
-                        "Sampler", "Scheduler", "Denoise", "VAE",
-                        "Positive Prompt S/R", "Negative Prompt S/R", "Checkpoint", "Clip Skip", "LoRA"],),
-            "Y_value": ("STRING", {"default": "", "multiline": True}),},}
+            "plot_type": (cls.plot_types,),
+            "plot_value": ("STRING", {"default": "", "multiline": True}),}
+        }
 
-    RETURN_TYPES = ("XY", "XY",)
-    RETURN_NAMES = ("X", "Y",)
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
-    def xy_value(self, X_type, X_value, Y_type, Y_value, prompt=None, my_unique_id=None):
+    def xy_value(self, plot_type, plot_value):
 
         # Store X values as arrays
-        if X_type not in {"Positive Prompt S/R", "Negative Prompt S/R", "VAE", "Checkpoint", "LoRA"}:
-            X_value = X_value.replace(" ", "")  # Remove spaces
-        X_value = X_value.replace("\n", "")  # Remove newline characters
-        X_value = X_value.rstrip(";")  # Remove trailing semicolon
-        X_value = X_value.split(";")  # Turn to array
-
-        # Store Y values as arrays
-        if Y_type not in {"Positive Prompt S/R", "Negative Prompt S/R", "VAE", "Checkpoint", "LoRA"}:
-            Y_value = Y_value.replace(" ", "")  # Remove spaces
-        Y_value = Y_value.replace("\n", "")  # Remove newline characters
-        Y_value = Y_value.rstrip(";")  # Remove trailing semicolon
-        Y_value = Y_value.split(";")  # Turn to array
+        if plot_type not in {"Positive Prompt S/R", "Negative Prompt S/R", "VAE", "Checkpoint", "LoRA"}:
+            plot_value = plot_value.replace(" ", "")  # Remove spaces
+        plot_value = plot_value.replace("\n", "")  # Remove newline characters
+        plot_value = plot_value.rstrip(";")  # Remove trailing semicolon
+        plot_value = plot_value.split(";")  # Turn to array
 
         # Define the valid bounds for each type
         bounds = {
@@ -2477,24 +3675,24 @@ class TSC_XYplot_Manual_XY_Entry:
 
                     if lora_name not in bounds["LoRA"]["options"]:
                         valid_loras = '\n'.join(bounds["LoRA"]["options"])
-                        print(f"\033[31mXY Plot Error:\033[0m '{lora_name}' is not a valid LoRA. Valid LoRAs are:\n{valid_loras}")
+                        print(f"{error('XY Plot Error:')} '{lora_name}' is not a valid LoRA. Valid LoRAs are:\n{valid_loras}")
                         lora_name = None
 
                     try:
                         model_str = float(model_str)
                         clip_str = float(clip_str)
                     except ValueError:
-                        print(f"\033[31mXY Plot Error:\033[0m The LoRA model strength and clip strength values should be numbers"
-                              f" between {bounds['LoRA']['model_str']['min']} and {bounds['LoRA']['model_str']['max']}.")
+                        print(f"{error('XY Plot Error:')} The LoRA model strength and clip strength values should be numbers"
+                            f" between {bounds['LoRA']['model_str']['min']} and {bounds['LoRA']['model_str']['max']}.")
                         return None
 
                     if model_str < bounds["LoRA"]["model_str"]["min"] or model_str > bounds["LoRA"]["model_str"]["max"]:
-                        print(f"\033[31mXY Plot Error:\033[0m '{model_str}' is not a valid LoRA model strength value. "
+                        print(f"{error('XY Plot Error:')} '{model_str}' is not a valid LoRA model strength value. "
                               f"Valid lora model strength values are between {bounds['LoRA']['model_str']['min']} and {bounds['LoRA']['model_str']['max']}.")
                         model_str = None
 
                     if clip_str < bounds["LoRA"]["clip_str"]["min"] or clip_str > bounds["LoRA"]["clip_str"]["max"]:
-                        print(f"\033[31mXY Plot Error:\033[0m '{clip_str}' is not a valid LoRA clip strength value. "
+                        print(f"{error('XY Plot Error:')} '{clip_str}' is not a valid LoRA clip strength value. "
                               f"Valid lora clip strength values are between {bounds['LoRA']['clip_str']['min']} and {bounds['LoRA']['clip_str']['max']}.")
                         clip_str = None
 
@@ -2505,8 +3703,7 @@ class TSC_XYplot_Manual_XY_Entry:
                 else:
                     if value not in bounds["LoRA"]["options"]:
                         valid_loras = '\n'.join(bounds["LoRA"]["options"])
-                        print(
-                            f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid LoRA. Valid LoRAs are:\n{valid_loras}")
+                        print(f"{error('XY Plot Error:')} '{value}' is not a valid LoRA. Valid LoRAs are:\n{valid_loras}")
                         return None
                     else:
                         return value, 1.0, 1.0
@@ -2515,88 +3712,51 @@ class TSC_XYplot_Manual_XY_Entry:
             else:
                 return None
 
-        # Validate X_value array length is 1 if doing a "Seeds++ Batch"
-        if len(X_value) != 1 and X_type == "Seeds++ Batch":
-            print(f"\033[31mXY Plot Error:\033[0m '{';'.join(X_value)}' is not a valid batch count.")
-            return (None,None,)
-
-        # Validate Y_value array length is 1 if doing a "Seeds++ Batch"
-        if len(Y_value) != 1 and Y_type == "Seeds++ Batch":
-            print(f"\033[31mXY Plot Error:\033[0m '{';'.join(Y_value)}' is not a valid batch count.")
-            return (None,None,)
+        # Validate plot_value array length is 1 if doing a "Seeds++ Batch"
+        if len(plot_value) != 1 and plot_type == "Seeds++ Batch":
+            print(f"{error('XY Plot Error:')} '{';'.join(plot_value)}' is not a valid batch count.")
+            return (None,)
 
         # Apply allowed shortcut syntax to certain input types
-        if X_type in ["Sampler", "Checkpoint", "LoRA"]:
-            if X_value[-1].startswith(','):
+        if plot_type in ["Sampler", "Checkpoint", "LoRA"]:
+            if plot_value[-1].startswith(','):
                 # Remove the leading comma from the last entry and store it as suffixes
-                suffixes = X_value.pop().lstrip(',').split(',')
+                suffixes = plot_value.pop().lstrip(',').split(',')
                 # Split all preceding entries into subentries
-                X_value = [entry.split(',') for entry in X_value]
+                plot_value = [entry.split(',') for entry in plot_value]
                 # Make all entries the same length as suffixes by appending missing elements
-                for entry in X_value:
+                for entry in plot_value:
                     entry += suffixes[len(entry) - 1:]
                 # Join subentries back into strings
-                X_value = [','.join(entry) for entry in X_value]
-
-        # Apply allowed shortcut syntax to certain input types
-        if Y_type in ["Sampler", "Checkpoint", "LoRA"]:
-            if Y_value[-1].startswith(','):
-                # Remove the leading comma from the last entry and store it as suffixes
-                suffixes = Y_value.pop().lstrip(',').split(',')
-                # Split all preceding entries into subentries
-                Y_value = [entry.split(',') for entry in Y_value]
-                # Make all entries the same length as suffixes by appending missing elements
-                for entry in Y_value:
-                    entry += suffixes[len(entry) - 1:]
-                # Join subentries back into strings
-                Y_value = [','.join(entry) for entry in Y_value]
+                plot_value = [','.join(entry) for entry in plot_value]
 
         # Prompt S/R X Cleanup
-        if X_type in {"Positive Prompt S/R", "Negative Prompt S/R"}:
-            if X_value[0] == '':
-                print(f"\033[31mXY Plot Error:\033[0m Prompt S/R value can not be empty.")
-                return (None, None,)
+        if plot_type in {"Positive Prompt S/R", "Negative Prompt S/R"}:
+            if plot_value[0] == '':
+                print(f"{error('XY Plot Error:')} Prompt S/R value can not be empty.")
+                return (None,)
             else:
-                X_value = [(X_value[0], None) if i == 0 else (X_value[0], x) for i, x in enumerate(X_value)]
+                plot_value = [(plot_value[0], None) if i == 0 else (plot_value[0], x) for i, x in enumerate(plot_value)]
 
-        # Prompt S/R X Cleanup
-        if Y_type in {"Positive Prompt S/R", "Negative Prompt S/R"}:
-            if Y_value[0] == '':
-                print(f"\033[31mXY Plot Error:\033[0m Prompt S/R value can not be empty.")
-                return (None, None,)
-            else:
-                Y_value = [(Y_value[0], None) if i == 0 else (Y_value[0], y) for i, y in enumerate(Y_value)]
-
-        # Loop over each entry in X_value and check if it's valid
-        if X_type not in {"Nothing", "Positive Prompt S/R", "Negative Prompt S/R"}:
-            for i in range(len(X_value)):
-                X_value[i] = validate_value(X_value[i], X_type, bounds)
-                if X_value[i] == None:
-                    return (None,None,)
-
-        # Loop over each entry in Y_value and check if it's valid
-        if Y_type not in {"Nothing", "Positive Prompt S/R", "Negative Prompt S/R"}:
-            for i in range(len(Y_value)):
-                Y_value[i] = validate_value(Y_value[i], Y_type, bounds)
-                if Y_value[i] == None:
-                    return (None,None,)
+        # Loop over each entry in plot_value and check if it's valid
+        if plot_type not in {"Nothing", "Positive Prompt S/R", "Negative Prompt S/R"}:
+            for i in range(len(plot_value)):
+                plot_value[i] = validate_value(plot_value[i], plot_type, bounds)
+                if plot_value[i] == None:
+                    return (None,)
 
         # Nest LoRA value in another array to reflect LoRA stack changes
-        if X_type == "LoRA":
-            X_value = [[x] for x in X_value]
-        if Y_type == "LoRA":
-            Y_value = [[y] for y in Y_value]
+        if plot_type == "LoRA":
+            plot_value = [[x] for x in plot_value]
 
         # Clean X/Y_values
-        if X_type == "Nothing":
-            X_value = [""]
-        if Y_type == "Nothing":
-            Y_value = [""]
+        if plot_type == "Nothing":
+            plot_value = [""]
 
-        return ((X_type, X_value), (Y_type, Y_value),)
+        return ((plot_type, plot_value),)
 
 #=======================================================================================================================
-# TSC XY Plot: Seeds Values
+# TSC XY Plot: Join Inputs
 class TSC_XYplot_JoinInputs:
 
     @classmethod
@@ -2609,18 +3769,19 @@ class TSC_XYplot_JoinInputs:
     RETURN_TYPES = ("XY",)
     RETURN_NAMES = ("X or Y",)
     FUNCTION = "xy_value"
-    CATEGORY = "Efficiency Nodes/XY Plot/XY Inputs"
+    CATEGORY = "Efficiency Nodes/XY Inputs"
 
     def xy_value(self, XY_1, XY_2):
         xy_type_1, xy_value_1 = XY_1
         xy_type_2, xy_value_2 = XY_2
 
         if xy_type_1 != xy_type_2:
-            print(f"\033[31mJoin XY Inputs Error:\033[0m Input types must match")
+            print(f"{error('Join XY Inputs Error:')} Input types must match")
             return (None,)
         elif xy_type_1 == "Seeds++ Batch":
             xy_type = xy_type_1
-            xy_value = [xy_value_1[0] + xy_value_2[0]]
+            combined_length = len(xy_value_1) + len(xy_value_2)
+            xy_value = list(range(combined_length))
         elif xy_type_1 == "Positive Prompt S/R" or xy_type_1 == "Negative Prompt S/R":
             xy_type = xy_type_1
             xy_value = xy_value_1 + [(xy_value_1[0][0], t[1]) for t in xy_value_2[1:]]
@@ -2734,40 +3895,171 @@ class TSC_ImageOverlay:
 NODE_CLASS_MAPPINGS = {
     "KSampler (Efficient)": TSC_KSampler,
     "KSampler Adv. (Efficient)":TSC_KSamplerAdvanced,
+    "KSampler SDXL (Eff.)": TSC_KSamplerSDXL,
     "Efficient Loader": TSC_EfficientLoader,
+    "Eff. Loader SDXL": TSC_EfficientLoaderSDXL,
     "LoRA Stacker": TSC_LoRA_Stacker,
-    "LoRA Stacker Adv.": TSC_LoRA_Stacker_Adv,
     "Control Net Stacker": TSC_Control_Net_Stacker,
+    "Apply ControlNet Stack": TSC_Apply_ControlNet_Stack,
+    "Unpack SDXL Tuple": TSC_Unpack_SDXL_Tuple,
+    "Pack SDXL Tuple": TSC_Pack_SDXL_Tuple,
+    #"Refiner Extras": TSC_SDXL_Refiner_Extras, # MAYBE FUTURE
     "XY Plot": TSC_XYplot,
     "XY Input: Seeds++ Batch": TSC_XYplot_SeedsBatch,
     "XY Input: Add/Return Noise": TSC_XYplot_AddReturnNoise,
     "XY Input: Steps": TSC_XYplot_Steps,
-    "XY Input: Start at Step": TSC_XYplot_StartStep,
-    "XY Input: End at Step": TSC_XYplot_EndStep,
     "XY Input: CFG Scale": TSC_XYplot_CFG,
-    "XY Input: Sampler": TSC_XYplot_Sampler,
-    "XY Input: Scheduler": TSC_XYplot_Scheduler,
+    "XY Input: Sampler/Scheduler": TSC_XYplot_Sampler_Scheduler,
     "XY Input: Denoise": TSC_XYplot_Denoise,
     "XY Input: VAE": TSC_XYplot_VAE,
-    "XY Input: Positive Prompt S/R": TSC_XYplot_PromptSR_Positive,
-    "XY Input: Negative Prompt S/R": TSC_XYplot_PromptSR_Negative,
+    "XY Input: Prompt S/R": TSC_XYplot_PromptSR,
+    "XY Input: Aesthetic Score": TSC_XYplot_AScore,
+    "XY Input: Refiner On/Off": TSC_XYplot_Refiner_OnOff,
     "XY Input: Checkpoint": TSC_XYplot_Checkpoint,
     "XY Input: Clip Skip": TSC_XYplot_ClipSkip,
     "XY Input: LoRA": TSC_XYplot_LoRA,
-    "XY Input: LoRA Adv.": TSC_XYplot_LoRA_Adv,
+    "XY Input: LoRA Plot": TSC_XYplot_LoRA_Plot,
     "XY Input: LoRA Stacks": TSC_XYplot_LoRA_Stacks,
-    "XY Input: Control Net Strengths": TSC_XYplot_Control_Net_Strengths,
+    "XY Input: Control Net": TSC_XYplot_Control_Net,
+    "XY Input: Control Net Plot": TSC_XYplot_Control_Net_Plot,
     "XY Input: Manual XY Entry": TSC_XYplot_Manual_XY_Entry,
     "Manual XY Entry Info": TSC_XYplot_Manual_XY_Entry_Info,
     "Join XY Inputs of Same Type": TSC_XYplot_JoinInputs,
     "Image Overlay": TSC_ImageOverlay
 }
+
 ########################################################################################################################
-# Simpleeval Nodes
+# HirRes Fix Script with model latent upscaler (https://github.com/city96/SD-Latent-Upscaler)
+comfy_latent_upscaler = None
+sd_latent_upscaler_path = os.path.join(custom_nodes_dir, "SD-Latent-Upscaler")
+if os.path.exists(sd_latent_upscaler_path):
+    printout = "Adding City96's 'SD-Latent-Upscaler' selections to the 'HighRes-Fix' node..."
+    print(f"{message('Efficiency Nodes:')} {printout}", end="")
+    try:
+        comfy_latent_upscaler = import_module("SD-Latent-Upscaler.comfy_latent_upscaler")
+        print(f"\r{message('Efficiency Nodes:')} {printout}{success('Success!')}")
+    except ImportError:
+        print(f"\r{message('Efficiency Nodes:')} {printout}{error('Failed!')}")
+
+# TSC HighRes-Fix
+class TSC_HighRes_Fix:
+
+    default_upscale_methods = LatentUpscaleBy.INPUT_TYPES()["required"]["upscale_method"][0]
+
+    latent_versions = []
+    if comfy_latent_upscaler:
+        latent_versions = comfy_latent_upscaler.LatentUpscaler.INPUT_TYPES()["required"]["latent_ver"][0]
+        latent_versions_updated = ["SD-Latent-Upscaler." + ver for ver in latent_versions]
+        allowed_scalings_raw = comfy_latent_upscaler.LatentUpscaler.INPUT_TYPES()["required"]["scale_factor"][0]
+        allowed_scalings = [float(scale) for scale in allowed_scalings_raw]
+    upscale_methods = default_upscale_methods + latent_versions_updated
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"latent_upscale_method": (cls.upscale_methods,),
+                            "upscale_by": ("FLOAT", {"default": 1.25, "min": 0.01, "max": 8.0, "step": 0.25}),
+                            "hires_steps": ("INT", {"default": 12, "min": 1, "max": 10000}),
+                            "denoise": ("FLOAT", {"default": .56, "min": 0.0, "max": 1.0, "step": 0.01}),
+                            "iterations": ("INT", {"default": 1, "min": 0, "max": 5, "step": 1}),
+                             },
+                "optional": {"script": ("SCRIPT",)}}
+
+    RETURN_TYPES = ("SCRIPT",)
+    FUNCTION = "hires_fix_script"
+    CATEGORY = "Efficiency Nodes/Scripts"
+
+    def hires_fix_script(self, latent_upscale_method, upscale_by, hires_steps, denoise, iterations, script=None):
+        upscale_function = None
+
+        def float_to_string(num):
+            if num == int(num):
+                return "{:.1f}".format(num)
+            else:
+                return str(num)
+
+        if iterations > 0:
+            # For latent methods from SD-Latent-Upscaler
+            if latent_upscale_method in self.latent_versions_updated:
+                # Remove extra characters added
+                latent_upscale_method = latent_upscale_method.replace("SD-Latent-Upscaler.", "")
+
+                # Set function to comfy_latent_upscaler.LatentUpscaler.upscale()
+                upscale_function = comfy_latent_upscaler.LatentUpscaler
+
+                # Find the nearest valid scaling in allowed_scalings
+                nearest_scaling = min(self.allowed_scalings, key=lambda x: abs(x - upscale_by))
+
+                # Retrieve the index of the nearest scaling
+                nearest_scaling_index = self.allowed_scalings.index(nearest_scaling)
+
+                # Use the index to get the raw string representation
+                nearest_scaling_raw = self.allowed_scalings_raw[nearest_scaling_index]
+
+                upscale_by = float_to_string(upscale_by)
+
+                # Check if the input upscale_by value was different from the nearest valid value
+                if upscale_by != nearest_scaling_raw:
+                    print(f"{warning('HighRes-Fix Warning:')} "
+                          f"When using 'SD-Latent-Upscaler.{latent_upscale_method}', 'upscale_by' must be one of {self.allowed_scalings_raw}.\n"
+                          f"Rounding to the nearest valid value ({nearest_scaling_raw}).\033[0m")
+                    upscale_by = nearest_scaling_raw
+
+            # For default upscale methods
+            elif latent_upscale_method in self.default_upscale_methods:
+                # Set function to LatentUpscaleBy.upscale()
+                upscale_function = LatentUpscaleBy
+
+            # Construct the script output
+            script = script or {}
+            script["hiresfix"] = (latent_upscale_method, upscale_by, hires_steps, denoise, iterations, upscale_function)
+
+        return (script,)
+
+NODE_CLASS_MAPPINGS.update({"HighRes-Fix Script": TSC_HighRes_Fix})
+
+########################################################################################################################
+'''# FUTURE
+# Tiled Sampling KSamplers (https://github.com/BlenderNeko/ComfyUI_TiledKSampler)
+blenderneko_tiled_ksampler_path = os.path.join(custom_nodes_dir, "ComfyUI_TiledKSampler")
+if os.path.exists(blenderneko_tiled_ksampler_path):
+    printout = "Importing BlenderNeko's 'ComfyUI_TiledKSampler' to enable the 'Tiled Sampling' node..."
+    print(f"{message('Efficiency Nodes:')} {printout}", end="")
+    try:
+        blenderneko_tiled_nodes = import_module("ComfyUI_TiledKSampler.nodes")
+        print(f"\r{message('Efficiency Nodes:')} {printout}{success('Success!')}")
+
+        # TSC Tiled Sampling
+        class TSC_Tiled_Sampling:
+
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {"required": {"tile_width": ("INT", {"default": 512, "min": 256, "max": MAX_RESOLUTION, "step": 64}),
+                                     "tile_height": ("INT", {"default": 512, "min": 256, "max": MAX_RESOLUTION, "step": 64}),
+                                     "tiling_strategy": (["random", "random strict", "padded", 'simple', 'none'],),
+                                     },
+                        "optional": {"script": ("SCRIPT",)}}
+
+            RETURN_TYPES = ("SCRIPT",)
+            FUNCTION = "tiled_sampling"
+            CATEGORY = "Efficiency Nodes/Scripts"
+
+            def tiled_sampling(self, tile_width, tile_height, tiling_strategy, script=None):
+                if tiling_strategy != 'none':
+                    script = script or {}
+                    script["tile"] = (tile_width, tile_height, tiling_strategy, blenderneko_tiled_nodes)
+                return (script,)
+
+        NODE_CLASS_MAPPINGS.update({"Tiled Sampling Script": TSC_Tiled_Sampling})
+
+    except ImportError:
+        print(f"\r{message('Efficiency Nodes:')} {printout}{error('Failed!')}")
+'''
+########################################################################################################################
+# Simpleeval Nodes (https://github.com/danthedeckie/simpleeval)
 try:
     import simpleeval
 
-    # TSC Evaluate Integers (https://github.com/danthedeckie/simpleeval)
+    # TSC Evaluate Integers
     class TSC_EvaluateInts:
         @classmethod
         def INPUT_TYPES(cls):
@@ -2792,7 +4084,7 @@ try:
             float_result = float(result)
             string_result = str(result)
             if print_to_console == "True":
-                print("\n\033[31mEvaluate Integers:\033[0m")
+                print(f"\n{error('Evaluate Integers:')}")
                 print(f"\033[90m{{a = {a} , b = {b} , c = {c}}} \033[0m")
                 print(f"{python_expression} = \033[92m INT: " + str(int_result) + " , FLOAT: " + str(
                     float_result) + ", STRING: " + string_result + "\033[0m")
@@ -2800,7 +4092,7 @@ try:
 
 
     # ==================================================================================================================
-    # TSC Evaluate Floats (https://github.com/danthedeckie/simpleeval)
+    # TSC Evaluate Floats
     class TSC_EvaluateFloats:
         @classmethod
         def INPUT_TYPES(cls):
@@ -2825,7 +4117,7 @@ try:
             float_result = float(result)
             string_result = str(result)
             if print_to_console == "True":
-                print("\n\033[31mEvaluate Floats:\033[0m")
+                print(f"\n{error('Evaluate Floats:')}")
                 print(f"\033[90m{{a = {a} , b = {b} , c = {c}}} \033[0m")
                 print(f"{python_expression} = \033[92m INT: " + str(int_result) + " , FLOAT: " + str(
                     float_result) + ", STRING: " + string_result + "\033[0m")
@@ -2833,7 +4125,7 @@ try:
 
 
     # ==================================================================================================================
-    # TSC Evaluate Strings (https://github.com/danthedeckie/simpleeval)
+    # TSC Evaluate Strings
     class TSC_EvaluateStrs:
         @classmethod
         def INPUT_TYPES(cls):
@@ -2859,14 +4151,14 @@ try:
 
             result = simpleeval.simple_eval(python_expression, names=variables, functions=functions)
             if print_to_console == "True":
-                print("\n\033[31mEvaluate Strings:\033[0m")
+                print(f"\n{error('Evaluate Strings:')}")
                 print(f"\033[90ma = {a} \nb = {b} \nc = {c}\033[0m")
                 print(f"{python_expression} = \033[92m" + str(result) + "\033[0m")
             return (str(result),)  # Convert result to a string before returning
 
 
     # ==================================================================================================================
-    # TSC Simple Eval Examples (https://github.com/danthedeckie/simpleeval)
+    # TSC Simple Eval Examples
     class TSC_EvalExamples:
         @classmethod
         def INPUT_TYPES(cls):
@@ -2885,4 +4177,4 @@ try:
     NODE_CLASS_MAPPINGS.update({"Simple Eval Examples": TSC_EvalExamples})
 
 except ImportError:
-    print(f"\r\033[33mEfficiency Nodes Warning:\033[0m Failed to import python package 'simpleeval'; related nodes disabled.\n")
+    print(f"{warning('Efficiency Nodes Warning:')} Failed to import python package 'simpleeval'; related nodes disabled.\n")
