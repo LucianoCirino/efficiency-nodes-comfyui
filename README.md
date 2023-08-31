@@ -38,7 +38,7 @@ Efficiency Nodes for ComfyUI
 - Node that allows users to specify parameters for the Efficient KSampler's to plot on a grid.
 
 <p align="center">
-  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20XY%20Plot.png?raw=true" width="320">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XY%20Plot/X-Seeds%20Y-Checkpoints%20&HiRes%20Fix%20(Overview).png?raw=true" width="320">
 </p>
 
 </details>
@@ -49,7 +49,7 @@ Efficiency Nodes for ComfyUI
 - Node that allows for flexible image overlaying. Works also with image batches.
 
 <p align="center">
-  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Image%20Overlay.png?raw=true" width="320">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XY%20Plot/X-Seeds%20Y-Checkpoints%20HiRes%20Fix%20(Overview).png?raw=true" width="320">
 </p>
 
 </details>
