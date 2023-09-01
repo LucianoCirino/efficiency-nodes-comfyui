@@ -311,8 +311,8 @@ class TSC_LoRA_Stacker:
             loras = [(lora_name, lora_weight, lora_weight) for lora_name, lora_weight in zip(loras, weights) if
                      lora_name != "None"]
         else:
-            model_strs = [kwargs.get(f"model_str_{i}", model_strength) for i in range(1, lora_count + 1)]
-            clip_strs = [kwargs.get(f"clip_str_{i}", clip_strength) for i in range(1, lora_count + 1)]
+            model_strs = [kwargs.get(f"model_str_{i}") for i in range(1, lora_count + 1)]
+            clip_strs = [kwargs.get(f"clip_str_{i}") for i in range(1, lora_count + 1)]
             loras = [(lora_name, model_str, clip_str) for lora_name, model_str, clip_str in
                      zip(loras, model_strs, clip_strs) if lora_name != "None"]
 
@@ -525,7 +525,7 @@ class TSC_KSampler:
 
         #---------------------------------------------------------------------------------------------------------------
         def vae_decode_latent(vae, samples, vae_decode):
-            return VAEDecodeTiled.decode_tiled(vae,samples)[0] if "tiled" in vae_decode else VAEDecode().decode(vae,samples)[0]
+            return VAEDecodeTiled().decode(vae,samples,512)[0] if "tiled" in vae_decode else VAEDecode().decode(vae,samples)[0]
 
         # ---------------------------------------------------------------------------------------------------------------
         def sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
@@ -3972,13 +3972,13 @@ NODE_CLASS_MAPPINGS = {
 
 ########################################################################################################################
 # HirRes Fix Script with model latent upscaler (https://github.com/city96/SD-Latent-Upscaler)
-comfy_latent_upscaler = None
-sd_latent_upscaler_path = os.path.join(custom_nodes_dir, "SD-Latent-Upscaler")
-if os.path.exists(sd_latent_upscaler_path):
+city96_latent_upscaler = None
+city96_latent_upscaler_path = os.path.join(custom_nodes_dir, "SD-Latent-Upscaler")
+if os.path.exists(city96_latent_upscaler_path):
     printout = "Adding City96's 'SD-Latent-Upscaler' selections to the 'HighRes-Fix' node..."
     print(f"{message('Efficiency Nodes:')} {printout}", end="")
     try:
-        comfy_latent_upscaler = import_module("SD-Latent-Upscaler.comfy_latent_upscaler")
+        city96_latent_upscaler = import_module("SD-Latent-Upscaler.comfy_latent_upscaler")
         print(f"\r{message('Efficiency Nodes:')} {printout}{success('Success!')}")
     except ImportError:
         print(f"\r{message('Efficiency Nodes:')} {printout}{error('Failed!')}")
@@ -3987,14 +3987,13 @@ if os.path.exists(sd_latent_upscaler_path):
 class TSC_HighRes_Fix:
 
     default_upscale_methods = LatentUpscaleBy.INPUT_TYPES()["required"]["upscale_method"][0]
+    city96_upscale_methods = list()
 
-    latent_versions = []
-    if comfy_latent_upscaler:
-        latent_versions = comfy_latent_upscaler.LatentUpscaler.INPUT_TYPES()["required"]["latent_ver"][0]
-        latent_versions_updated = ["SD-Latent-Upscaler." + ver for ver in latent_versions]
-        allowed_scalings_raw = comfy_latent_upscaler.LatentUpscaler.INPUT_TYPES()["required"]["scale_factor"][0]
-        allowed_scalings = [float(scale) for scale in allowed_scalings_raw]
-    upscale_methods = default_upscale_methods + latent_versions_updated
+    if city96_latent_upscaler:
+        city96_upscale_methods = ["SD-Latent-Upscaler." + ver for ver in city96_latent_upscaler.LatentUpscaler.INPUT_TYPES()["required"]["latent_ver"][0]]
+        city96_scalings_raw = city96_latent_upscaler.LatentUpscaler.INPUT_TYPES()["required"]["scale_factor"][0]
+        city96_scalings_float = [float(scale) for scale in city96_scalings_raw]
+    upscale_methods = default_upscale_methods + city96_upscale_methods
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -4021,35 +4020,40 @@ class TSC_HighRes_Fix:
 
         if iterations > 0:
             # For latent methods from SD-Latent-Upscaler
-            if latent_upscale_method in self.latent_versions_updated:
+            if latent_upscale_method in self.city96_upscale_methods:
                 # Remove extra characters added
                 latent_upscale_method = latent_upscale_method.replace("SD-Latent-Upscaler.", "")
 
-                # Set function to comfy_latent_upscaler.LatentUpscaler.upscale()
-                upscale_function = comfy_latent_upscaler.LatentUpscaler
+                # Set function to city96_latent_upscaler.LatentUpscaler
+                upscale_function = city96_latent_upscaler.LatentUpscaler
 
-                # Find the nearest valid scaling in allowed_scalings
-                nearest_scaling = min(self.allowed_scalings, key=lambda x: abs(x - upscale_by))
+                # Find the nearest valid scaling in city96_scalings_float
+                nearest_scaling = min(self.city96_scalings_float, key=lambda x: abs(x - upscale_by))
 
                 # Retrieve the index of the nearest scaling
-                nearest_scaling_index = self.allowed_scalings.index(nearest_scaling)
+                nearest_scaling_index = self.city96_scalings_float.index(nearest_scaling)
 
                 # Use the index to get the raw string representation
-                nearest_scaling_raw = self.allowed_scalings_raw[nearest_scaling_index]
+                nearest_scaling_raw = self.city96_scalings_raw[nearest_scaling_index]
 
                 upscale_by = float_to_string(upscale_by)
 
                 # Check if the input upscale_by value was different from the nearest valid value
                 if upscale_by != nearest_scaling_raw:
                     print(f"{warning('HighRes-Fix Warning:')} "
-                          f"When using 'SD-Latent-Upscaler.{latent_upscale_method}', 'upscale_by' must be one of {self.allowed_scalings_raw}.\n"
+                          f"When using 'SD-Latent-Upscaler.{latent_upscale_method}', 'upscale_by' must be one of {self.city96_scalings_raw}.\n"
                           f"Rounding to the nearest valid value ({nearest_scaling_raw}).\033[0m")
                     upscale_by = nearest_scaling_raw
 
             # For default upscale methods
             elif latent_upscale_method in self.default_upscale_methods:
-                # Set function to LatentUpscaleBy.upscale()
                 upscale_function = LatentUpscaleBy
+
+            else: # Default
+                upscale_function = LatentUpscaleBy
+                latent_upscale_method = self.default_upscale_methods[0]
+                print(f"{warning('HiResFix Script Warning:')} Chosen latent upscale method not found! "
+                      f"defaulting to '{latent_upscale_method}'.\n")
 
             # Construct the script output
             script = script or {}
