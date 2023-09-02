@@ -165,7 +165,7 @@ class TSC_EfficientLoader:
         positive_encoded, negative_encoded, refiner_positive_encoded, refiner_negative_encoded = \
             encode_prompts(positive, negative, clip, clip_skip, refiner_clip, refiner_clip_skip, ascore,
                            loader_type == "sdxl", empty_latent_width, empty_latent_height)
-        
+
         # Apply ControlNet Stack if given
         if cnet_stack:
             positive_encoded = TSC_Apply_ControlNet_Stack().apply_cnet_stack(positive_encoded,cnet_stack)[0]
@@ -173,7 +173,7 @@ class TSC_EfficientLoader:
         # Check for custom VAE
         if vae_name != "Baked VAE":
             vae = load_vae(vae_name, my_unique_id, cache=vae_cache, cache_overwrite=True)
-            
+
         # Data for XY Plot
         dependencies = (vae_name, ckpt_name, clip, clip_skip, refiner_name, refiner_clip, refiner_clip_skip,
                         positive, negative, ascore, empty_latent_width, empty_latent_height, lora_params, cnet_stack)
@@ -181,7 +181,7 @@ class TSC_EfficientLoader:
         ### Debugging
         ###print_loaded_objects_entries()
         print_loaded_objects_entries(my_unique_id, prompt)
-        
+
         if loader_type == "regular":
             return (model, positive_encoded, negative_encoded, {"samples":latent}, vae, clip, dependencies,)
         elif loader_type == "sdxl":
@@ -842,7 +842,7 @@ class TSC_KSampler:
                 elif type_ == "VAE" and isinstance(value, list):
                     # For each string in the list, extract the filename from the path
                     return [os.path.basename(v) for v in value]
-                
+
                 elif (type_ == "Checkpoint" or type_ == "Refiner") and isinstance(value, list):
                     # For each tuple in the list, return only the first value if the second or third value is None
                     return [(os.path.basename(v[0]),) + v[1:] if v[1] is None or v[2] is None
@@ -1288,6 +1288,9 @@ class TSC_KSampler:
                     # Print the desired value
                     text = f'{var_type}: {round(cnet_stack[0][0][entry_index], 3)}'
 
+                elif var_type == "XY_Capsule":
+                    text = var.getLabel()
+
                 else: # No matching type found
                     text=""
 
@@ -1400,20 +1403,33 @@ class TSC_KSampler:
             def process_values(model, refiner_model, add_noise, seed, steps, start_at_step, end_at_step,
                                return_with_leftover_noise, cfg, sampler_name, scheduler, positive, negative,
                                refiner_positive, refiner_negative, latent_image, denoise, vae, vae_decode,
-                               sampler_type, latent_list=[], image_tensor_list=[], image_pil_list=[]):
+                               sampler_type, latent_list=[], image_tensor_list=[], image_pil_list=[], xy_capsule=None):
 
-                if preview_method != "none":
-                    send_command_to_frontend(startListening=True, maxCount=steps - 1, sendBlob=False)
+                capsule_result = None
+                if xy_capsule is not None:
+                    capsule_result = xy_capsule.get_result(model, clip, vae)
+                    if capsule_result is not None:
+                        image, latent = capsule_result
+                        latent_list.append(latent)
 
-                samples = sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-                                              latent_image, denoise, sampler_type, add_noise, start_at_step, end_at_step,
-                                              return_with_leftover_noise, refiner_model, refiner_positive, refiner_negative)
+                if capsule_result is None:
+                    if preview_method != "none":
+                        send_command_to_frontend(startListening=True, maxCount=steps - 1, sendBlob=False)
 
-                # Add the latent tensor to the tensors list
-                latent_list.append(samples)
+                    samples = sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
+                                                  latent_image, denoise, sampler_type, add_noise, start_at_step,
+                                                  end_at_step,
+                                                  return_with_leftover_noise, refiner_model, refiner_positive,
+                                                  refiner_negative)
 
-                # Decode the latent tensor
-                image = vae_decode_latent(vae, samples, vae_decode)
+                    # Add the latent tensor to the tensors list
+                    latent_list.append(samples)
+
+                    # Decode the latent tensor
+                    image = vae_decode_latent(vae, samples, vae_decode)
+
+                    if xy_capsule is not None:
+                        xy_capsule.set_result(image, samples)
 
                 # Add the resulting image tensor to image_tensor_list
                 image_tensor_list.append(image)
@@ -1447,8 +1463,13 @@ class TSC_KSampler:
             # Change the global preview method temporarily during this node's execution
             set_preview_method(preview_method)
 
+            original_model = model.clone()
+            original_clip = clip.clone()
+
             # Fill Plot Rows (X)
             for X_index, X in enumerate(X_value):
+                model = original_model.clone()
+                clip = original_clip.clone()
 
                 # Define X parameters and generate labels
                 add_noise, seed, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
@@ -1460,7 +1481,10 @@ class TSC_KSampler:
                                     ckpt_name, clip_skip, refiner_name, refiner_clip_skip, positive_prompt,
                                     negative_prompt, ascore, lora_stack, cnet_stack, X_label, len(X_value))
 
+
                 if X_type != "Nothing" and Y_type == "Nothing":
+                    if X_type == "XY_Capsule":
+                        model, clip, vae = X.pre_define_model(model, clip, vae)
 
                     # Models & Conditionings
                     model, positive, negative, refiner_model, refiner_positive, refiner_negative, vae = \
@@ -1469,15 +1493,24 @@ class TSC_KSampler:
                                      positive_prompt[0], negative_prompt[0], ascore, vae, vae_name, lora_stack, cnet_stack[0],
                                      0, types, xyplot_id, cache, sampler_type, empty_latent_width, empty_latent_height)
 
+                    xy_capsule = None
+                    if X_type == "XY_Capsule":
+                        xy_capsule = X
+
                     # Generate Results
                     latent_list, image_tensor_list, image_pil_list = \
                         process_values(model, refiner_model, add_noise, seed, steps, start_at_step, end_at_step,
                                        return_with_leftover_noise, cfg, sampler_name, scheduler[0], positive, negative,
-                                       refiner_positive, refiner_negative, latent_image, denoise, vae, vae_decode, sampler_type)
+                                       refiner_positive, refiner_negative, latent_image, denoise, vae, vae_decode, sampler_type, xy_capsule=xy_capsule)
 
                 elif X_type != "Nothing" and Y_type != "Nothing":
                     # Seed control based on loop index during Batch
                     for Y_index, Y in enumerate(Y_value):
+                        model = original_model.clone()
+                        clip = original_clip.clone()
+
+                        if Y_type == "XY_Capsule" and X_type == "XY_Capsule":
+                            Y.set_x_capsule(X)
 
                         # Define Y parameters and generate labels
                         add_noise, seed, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
@@ -1489,6 +1522,11 @@ class TSC_KSampler:
                                             ckpt_name, clip_skip, refiner_name, refiner_clip_skip, positive_prompt,
                                             negative_prompt, ascore, lora_stack, cnet_stack, Y_label, len(Y_value))
 
+                        if Y_type == "XY_Capsule":
+                            model, clip, vae = Y.pre_define_model(model, clip, vae)
+                        elif X_type == "XY_Capsule":
+                            model, clip, vae = X.pre_define_model(model, clip, vae)
+
                         # Models & Conditionings
                         model, positive, negative, refiner_model, refiner_positive, refiner_negative, vae = \
                             define_model(model, clip, clip_skip[0], refiner_model, refiner_clip, refiner_clip_skip[0],
@@ -1498,11 +1536,15 @@ class TSC_KSampler:
                                          empty_latent_height)
 
                         # Generate Results
+                        xy_capsule = None
+                        if Y_type == "XY_Capsule":
+                            xy_capsule = Y
+
                         latent_list, image_tensor_list, image_pil_list = \
                             process_values(model, refiner_model, add_noise, seed, steps, start_at_step, end_at_step,
                                            return_with_leftover_noise, cfg, sampler_name, scheduler[0],
                                            positive, negative, refiner_positive, refiner_negative, latent_image,
-                                           denoise, vae, vae_decode, sampler_type)
+                                           denoise, vae, vae_decode, sampler_type, xy_capsule=xy_capsule)
 
             # Clean up cache
             if cache_models == "False":
@@ -2284,7 +2326,7 @@ class TSC_XYplot:
             Y_value = [""]
 
         # If types are the same exit. If one isn't "Nothing", print error
-        if (X_type == Y_type):
+        if X_type != "XY_Capsule" and (X_type == Y_type):
             if X_type != "Nothing":
                 print(f"{error('XY Plot Error:')} X and Y input types must be different.")
             return (None,)
@@ -2596,7 +2638,7 @@ class TSC_XYplot_VAE:
 
                 # Construct the xy_value using the obtained vaes
                 xy_value = [vae for vae in vaes]
-                
+
                 if batch_max != -1:  # If there's a limit
                     xy_value = xy_value[:batch_max]
 
@@ -3200,7 +3242,7 @@ class TSC_XYplot_Control_Net_End:
 
         if batch_count == 0:
             return (None,)
-        
+
         xy_type = "ControlNetEnd%"
         percent_increment = (last_end_percent - first_end_percent) / (batch_count - 1) if batch_count > 1 else 0
 

@@ -627,3 +627,20 @@ if websocket_status == True:
     server_thread = threading.Thread(target=run_server)
     server_thread.daemon = True
     server_thread.start()
+
+
+class XY_Capsule:
+    def pre_define_model(self, model, clip, vae):
+        return model, clip, vae
+
+    def set_result(self, image, latent):
+        pass
+
+    def get_result(self, model, clip, vae):
+        return None
+
+    def set_x_capsule(self, capsule):
+        return None
+
+    def getLabel(self):
+        return "Unknown"
