@@ -234,9 +234,9 @@ class TSC_Unpack_SDXL_Tuple:
     def INPUT_TYPES(cls):
         return {"required": {"sdxl_tuple": ("SDXL_TUPLE",)},}
 
-    RETURN_TYPES = ("MODEL", "CLIP", "MODEL", "CLIP", "CONDITIONING","CONDITIONING", "CONDITIONING", "CONDITIONING",)
-    RETURN_NAMES = ("BASE_MODEL", "BASE_CLIP", "REFINER_MODEL", "REFINER_CLIP",
-                    "BASE_CONDITIONING+", "BASE_CONDITIONING-","REFINER_CONDITIONING+","REFINER_CONDITIONING-",)
+    RETURN_TYPES = ("MODEL", "CLIP", "CONDITIONING","CONDITIONING", "MODEL", "CLIP", "CONDITIONING", "CONDITIONING",)
+    RETURN_NAMES = ("BASE_MODEL", "BASE_CLIP", "BASE_CONDITIONING+", "BASE_CONDITIONING-",
+                    "REFINER_MODEL", "REFINER_CLIP","REFINER_CONDITIONING+","REFINER_CONDITIONING-",)
     FUNCTION = "unpack_sdxl_tuple"
     CATEGORY = "Efficiency Nodes/Misc"
 
@@ -1240,15 +1240,15 @@ class TSC_KSampler:
 
                     elif var_type == "LoRA Wt":
                         lora_model_wt = format(float(lora_model_wt), ".2f").rstrip('0').rstrip('.')
-                        text = f"LoRA[Wt]: {lora_model_wt}"
+                        text = f"LoRA Wt: {lora_model_wt}"
 
                     elif var_type == "LoRA MStr":
                         lora_model_wt = format(float(lora_model_wt), ".2f").rstrip('0').rstrip('.')
-                        text = f"LoRA[M]: {lora_model_wt}"
+                        text = f"LoRA Mstr: {lora_model_wt}"
 
                     elif var_type == "LoRA CStr":
                         lora_clip_wt = format(float(lora_clip_wt), ".2f").rstrip('0').rstrip('.')
-                        text = f"LoRA[C]: {lora_clip_wt}"
+                        text = f"LoRA Cstr: {lora_clip_wt}"
 
                 elif var_type in ["ControlNetStrength", "ControlNetStart%", "ControlNetEnd%"]:
                     if "Strength" in var_type:
@@ -1463,13 +1463,25 @@ class TSC_KSampler:
             # Change the global preview method temporarily during this node's execution
             set_preview_method(preview_method)
 
-            original_model = model.clone()
-            original_clip = clip.clone()
+            # Clone original model parameters
+            def clone_or_none(*originals):
+                cloned_items = []
+                for original in originals:
+                    try:
+                        cloned_items.append(original.clone())
+                    except (AttributeError, TypeError):
+                        # If not clonable, just append the original item
+                        cloned_items.append(original)
+                return cloned_items
+            original_model, original_clip, original_positive, original_negative,\
+                original_refiner_model, original_refiner_clip, original_refiner_positive, original_refiner_negative =\
+                clone_or_none(model, clip, positive, negative, refiner_model, refiner_clip, refiner_positive, refiner_negative)
 
             # Fill Plot Rows (X)
             for X_index, X in enumerate(X_value):
-                model = original_model.clone()
-                clip = original_clip.clone()
+                # Reset model parameters to their originals
+                model, clip, refiner_model, refiner_clip = \
+                    clone_or_none(original_model, original_clip, original_refiner_model, original_refiner_clip)
 
                 # Define X parameters and generate labels
                 add_noise, seed, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
@@ -1504,10 +1516,11 @@ class TSC_KSampler:
                                        refiner_positive, refiner_negative, latent_image, denoise, vae, vae_decode, sampler_type, xy_capsule=xy_capsule)
 
                 elif X_type != "Nothing" and Y_type != "Nothing":
-                    # Seed control based on loop index during Batch
+                    
                     for Y_index, Y in enumerate(Y_value):
-                        model = original_model.clone()
-                        clip = original_clip.clone()
+                        # Reset model parameters to their originals
+                        model, clip, refiner_model, refiner_clip = \
+                            clone_or_none(original_model, original_clip, original_refiner_model, original_refiner_clip)
 
                         if Y_type == "XY_Capsule" and X_type == "XY_Capsule":
                             Y.set_x_capsule(X)
@@ -1592,6 +1605,10 @@ class TSC_KSampler:
 
                 def get_checkpoint_name(X_type, Y_type, X_value, Y_value, ckpt_name, clip_skip, mode, vae_name=None):
 
+                    # If ckpt_name is None, return it as is
+                    if ckpt_name is not None:
+                        ckpt_name = os.path.basename(ckpt_name)
+
                     # Define types based on mode
                     primary_type = "Checkpoint" if mode == "ckpt" else "Refiner"
                     clip_type = "Clip Skip" if mode == "ckpt" else "Clip Skip (Refiner)"
@@ -1609,11 +1626,10 @@ class TSC_KSampler:
                             if vae_name:
                                 vae_name = get_vae_name(X_type, Y_type, X_value, Y_value, vae_name)
                             clip_skip = get_clip_skip(X_type, Y_type, X_value, Y_value, clip_skip)
-                            ckpt_name = os.path.basename(ckpt_name)
-                            return os.path.basename(ckpt_name), clip_skip, vae_name
+                            return ckpt_name, clip_skip, vae_name
                         else:
                             # For refn mode
-                            return os.path.basename(ckpt_name), clip_skip
+                            return ckpt_name, clip_skip
 
                     # Process clip skip based on mode
                     if othr_type == clip_type:
@@ -1664,24 +1680,46 @@ class TSC_KSampler:
                     else:
                         if X_type in lora_types:
                             value = get_lora_sublist_name(X_type, X_value)
-                            if X_type == "LoRA" or X_type == "LoRA Batch":
+                            if  X_type == "LoRA":
                                 lora_name = value
+                                lora_model_str = None
+                                lora_clip_str = None
+                            if X_type == "LoRA Batch":
+                                lora_name = value
+                                lora_model_str = X_value[0][0][1] if lora_model_str is None else lora_model_str
+                                lora_clip_str = X_value[0][0][2] if lora_clip_str is None else lora_clip_str
                             elif X_type == "LoRA MStr":
+                                lora_name = os.path.basename(X_value[0][0][0]) if lora_name is None else lora_name
                                 lora_model_str = value
+                                lora_clip_str = X_value[0][0][2] if lora_clip_str is None else lora_clip_str
                             elif X_type == "LoRA CStr":
+                                lora_name = os.path.basename(X_value[0][0][0]) if lora_name is None else lora_name
+                                lora_model_str = X_value[0][0][1] if lora_model_str is None else lora_model_str
                                 lora_clip_str = value
                             elif X_type == "LoRA Wt":
+                                lora_name = os.path.basename(X_value[0][0][0]) if lora_name is None else lora_name
                                 lora_wt = value
 
                         if Y_type in lora_types:
                             value = get_lora_sublist_name(Y_type, Y_value)
-                            if Y_type == "LoRA" or Y_type == "LoRA Batch":
+                            if  Y_type == "LoRA":
                                 lora_name = value
+                                lora_model_str = None
+                                lora_clip_str = None
+                            if Y_type == "LoRA Batch":
+                                lora_name = value
+                                lora_model_str = Y_value[0][0][1] if lora_model_str is None else lora_model_str
+                                lora_clip_str = Y_value[0][0][2] if lora_clip_str is None else lora_clip_str
                             elif Y_type == "LoRA MStr":
+                                lora_name = os.path.basename(Y_value[0][0][0]) if lora_name is None else lora_name
                                 lora_model_str = value
+                                lora_clip_str = Y_value[0][0][2] if lora_clip_str is None else lora_clip_str
                             elif Y_type == "LoRA CStr":
+                                lora_name = os.path.basename(Y_value[0][0][0]) if lora_name is None else lora_name
+                                lora_model_str = Y_value[0][0][1] if lora_model_str is None else lora_model_str
                                 lora_clip_str = value
                             elif Y_type == "LoRA Wt":
+                                lora_name = os.path.basename(Y_value[0][0][0]) if lora_name is None else lora_name
                                 lora_wt = value
 
                     return lora_name, lora_wt, lora_model_str, lora_clip_str
@@ -1791,13 +1829,13 @@ class TSC_KSampler:
                         print(f"+ascore: {pos_ascore if pos_ascore is not None else ''}")
                         print(f"-ascore: {neg_ascore if neg_ascore is not None else ''}")
                 if lora_name:
-                    print(f"lora: {lora_name if lora_name is not None else ''}")
+                    print(f"lora: {lora_name}")
                 if lora_wt:
                     print(f"lora_wt: {lora_wt}")
                 if lora_model_str:
-                    print(f"lora_model_str: {lora_model_str}")
+                    print(f"lora_mstr: {lora_model_str}")
                 if lora_clip_str:
-                    print(f"lora_clip_str: {lora_clip_str}")
+                    print(f"lora_cstr: {lora_clip_str}")
                 if vae_name:
                     print(f"vae:  {vae_name}")
                 if sampler_type == "advanced":
@@ -2119,9 +2157,11 @@ class TSC_KSampler:
             send_command_to_frontend(startListening=False)
 
         if sampler_type == "sdxl":
-            result = (sdxl_tuple, {"samples": latent_list}, vae, output_images,)
+            sdxl_tuple = original_model, original_clip, original_positive, original_negative,\
+                original_refiner_model, original_refiner_clip, original_refiner_positive, original_refiner_negative
+            result = (sdxl_tuple, latent_list, optional_vae, output_images,)
         else:
-            result = (model, positive, negative, {"samples": latent_list}, vae, output_images,)
+            result = (original_model, original_positive, original_negative, latent_list, optional_vae, output_images,)
         return {"ui": {"images": preview_images}, "result": result}
 
 #=======================================================================================================================
@@ -3680,7 +3720,7 @@ class TSC_XYplot_Manual_XY_Entry:
                         if checkpoint is None or clip_skip is None:
                             return None
                         else:
-                            return checkpoint, clip_skip
+                            return checkpoint, clip_skip, None
                     else:
                         print(
                             f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid checkpoint.'")
@@ -3692,7 +3732,7 @@ class TSC_XYplot_Manual_XY_Entry:
                             f"\033[31mXY Plot Error:\033[0m '{value}' is not a valid checkpoint. Valid checkpoints are:\n{valid_checkpoints}")
                         return None
                     else:
-                        return value, None
+                        return value, None, None
             # __________________________________________________________________________________________________________
             # Clip Skip
             elif value_type == "Clip Skip":
@@ -3786,6 +3826,10 @@ class TSC_XYplot_Manual_XY_Entry:
                 plot_value[i] = validate_value(plot_value[i], plot_type, bounds)
                 if plot_value[i] == None:
                     return (None,)
+
+        # Set up Seeds++ Batch structure
+        if plot_type == "Seeds++ Batch":
+            plot_value = list(range(plot_value[0]))
 
         # Nest LoRA value in another array to reflect LoRA stack changes
         if plot_type == "LoRA":
@@ -3964,8 +4008,8 @@ NODE_CLASS_MAPPINGS = {
     "XY Input: LoRA Stacks": TSC_XYplot_LoRA_Stacks,
     "XY Input: Control Net": TSC_XYplot_Control_Net,
     "XY Input: Control Net Plot": TSC_XYplot_Control_Net_Plot,
-    #"XY Input: Manual XY Entry": TSC_XYplot_Manual_XY_Entry, # DISABLED, NEEDS UPDATE
-    #"Manual XY Entry Info": TSC_XYplot_Manual_XY_Entry_Info, # DISABLED, NEEDS UPDATE
+    "XY Input: Manual XY Entry": TSC_XYplot_Manual_XY_Entry, # DISABLED, NEEDS UPDATE
+    "Manual XY Entry Info": TSC_XYplot_Manual_XY_Entry_Info, # DISABLED, NEEDS UPDATE
     "Join XY Inputs of Same Type": TSC_XYplot_JoinInputs,
     "Image Overlay": TSC_ImageOverlay
 }
