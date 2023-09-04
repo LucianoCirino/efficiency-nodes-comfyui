@@ -1479,9 +1479,6 @@ class TSC_KSampler:
 
             # Fill Plot Rows (X)
             for X_index, X in enumerate(X_value):
-                # Reset model parameters to their originals
-                model, clip, refiner_model, refiner_clip = \
-                    clone_or_none(original_model, original_clip, original_refiner_model, original_refiner_clip)
 
                 # Define X parameters and generate labels
                 add_noise, seed, steps, start_at_step, end_at_step, return_with_leftover_noise, cfg,\
@@ -1496,6 +1493,8 @@ class TSC_KSampler:
 
                 if X_type != "Nothing" and Y_type == "Nothing":
                     if X_type == "XY_Capsule":
+                        model, clip, refiner_model, refiner_clip = \
+                            clone_or_none(original_model, original_clip, original_refiner_model, original_refiner_clip)
                         model, clip, vae = X.pre_define_model(model, clip, vae)
 
                     # Models & Conditionings
@@ -1516,13 +1515,11 @@ class TSC_KSampler:
                                        refiner_positive, refiner_negative, latent_image, denoise, vae, vae_decode, sampler_type, xy_capsule=xy_capsule)
 
                 elif X_type != "Nothing" and Y_type != "Nothing":
-                    
                     for Y_index, Y in enumerate(Y_value):
-                        # Reset model parameters to their originals
-                        model, clip, refiner_model, refiner_clip = \
-                            clone_or_none(original_model, original_clip, original_refiner_model, original_refiner_clip)
 
                         if Y_type == "XY_Capsule" and X_type == "XY_Capsule":
+                            model, clip, refiner_model, refiner_clip = \
+                                clone_or_none(original_model, original_clip, original_refiner_model, original_refiner_clip)
                             Y.set_x_capsule(X)
 
                         # Define Y parameters and generate labels
