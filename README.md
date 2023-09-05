@@ -12,7 +12,7 @@ Efficiency Nodes for ComfyUI
 - Used by the XY Plot node for many of its plot type dependencies.
 
 <p align="center">
-  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Efficient%20Loader.png?raw=true" width="320">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Efficient%20Loader.png" width="320">
 </p>
 
 </details>
@@ -25,9 +25,9 @@ Efficiency Nodes for ComfyUI
 - Can be set to re-output their last outputs by force.   <i>('sampler_state' = "Hold")</i>
 
 <p align="center">
-  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20KSampler%20(Efficient).png?raw=true" width="320">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20KSampler%20(Efficient).png" width="320">
   &nbsp; &nbsp; &nbsp; &nbsp;
-  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20KSampler%20Adv.%20(Efficient).png?raw=true" width="320">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20KSampler%20Adv.%20(Efficient).png" width="320">
 </p>
 
 </details>
@@ -38,7 +38,7 @@ Efficiency Nodes for ComfyUI
 - Node that allows users to specify parameters for the Efficient KSampler's to plot on a grid.
 
 <p align="center">
-  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20XY%20Plot.png?raw=true" width="320">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20XY%20Plot.png" width="320">
 </p>
 
 </details>
@@ -49,7 +49,7 @@ Efficiency Nodes for ComfyUI
 - Node that allows for flexible image overlaying. Works also with image batches.
 
 <p align="center">
-  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Image%20Overlay.png?raw=true" width="320">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Image%20Overlay.png" width="320">
 </p>
  
 </details>
@@ -60,11 +60,11 @@ Efficiency Nodes for ComfyUI
 - A collection of nodes that allows users to write simple Python expressions for a variety of data types using the "<a href="https://github.com/danthedeckie/simpleeval" >simpleeval</a>" library.
 
 <p align="center">
-  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Evaluate%20Integers.png?raw=true" width="320">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Evaluate%20Integers.png" width="320">
   &nbsp; &nbsp;
-  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Evaluate%20Floats.png?raw=true" width="320">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Evaluate%20Floats.png" width="320">
   &nbsp; &nbsp;
-  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Evaluate%20Strings.png?raw=true" width="320">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Evaluate%20Strings.png" width="320">
 </p>
 
 </details>
@@ -73,21 +73,21 @@ Efficiency Nodes for ComfyUI
   
 - HiResFix using the **Efficient Loader**, **Ksampler (Efficient)**, and **HiResFix Script** nodes
 
-[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/HiRes Fix (overview).png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/HiRes%20Fix.png?raw=true)
+[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/HiRes Fix (overview).png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/HiRes%20Fix.png)
 
 - SDXL Refining using the **Eff. SDXL Loader**, and **Ksampler SDXL (Eff.)**
 
-[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/SDXL Base+Refine (Overview).png" width="640">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/SDXL%20Base%2BRefine.png?raw=true)
+[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/SDXL Base+Refine (Overview).png" width="640">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/SDXL%20Base%2BRefine.png)
 
 - 2D Plotting using the **XY Plot** & **Ksampler (Efficient)** nodes 
 
-[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/X-Seeds Y-Checkpoints (overview).png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/X-Seeds%20Y-Checkpoints.png?raw=true)
+[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/X-Seeds Y-Checkpoints (overview).png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/X-Seeds%20Y-Checkpoints.png)
 
-[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/LoRA Plot X-ModelStr Y-ClipStr (Overview).png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/LoRA%20Plot%20X-ModelStr%20Y-ClipStr.png?raw=true)
+[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/LoRA Plot X-ModelStr Y-ClipStr (Overview).png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/LoRA%20Plot%20X-ModelStr%20Y-ClipStr.png)
 
 - Photobashing using the **Image Overlay** node
 
-[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/Image Overlay (overview).png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/Image%20Overlay.png?raw=true)
+[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/Image Overlay (overview).png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/Image%20Overlay.png)
 
 ### Dependencies
 Dependencies are automatically installed during ComfyUI boot up.
