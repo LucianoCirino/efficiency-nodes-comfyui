@@ -168,7 +168,8 @@ class TSC_EfficientLoader:
 
         # Apply ControlNet Stack if given
         if cnet_stack:
-            positive_encoded = TSC_Apply_ControlNet_Stack().apply_cnet_stack(positive_encoded,cnet_stack)[0]
+            controlnet_conditioning = TSC_Apply_ControlNet_Stack().apply_cnet_stack(positive_encoded, negative_encoded, cnet_stack)
+            positive_encoded, negative_encoded = controlnet_conditioning[0], controlnet_conditioning[1]
 
         # Check for custom VAE
         if vae_name != "Baked VAE":
@@ -356,22 +357,23 @@ class TSC_Apply_ControlNet_Stack:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"conditioning": ("CONDITIONING",),
-                            "cnet_stack": ("CONTROL_NET_STACK",)},
+        return {"required": {"positive": ("CONDITIONING",),
+                             "negative": ("CONDITIONING",),
+                             "cnet_stack": ("CONTROL_NET_STACK",)},
                 }
 
-    RETURN_TYPES = ("CONDITIONING",)
-    RETURN_NAMES = ("CONDITIONING",)
+    RETURN_TYPES = ("CONDITIONING","CONDITIONING",)
+    RETURN_NAMES = ("CONDITIONING+","CONDITIONING-",)
     FUNCTION = "apply_cnet_stack"
     CATEGORY = "Efficiency Nodes/Stackers"
 
-    def apply_cnet_stack(self, conditioning, cnet_stack):
+    def apply_cnet_stack(self, positive, negative, cnet_stack):
         for control_net_tuple in cnet_stack:
             control_net, image, strength, start_percent, end_percent = control_net_tuple
-            conditioning_new = ControlNetApplyAdvanced().apply_controlnet(conditioning, conditioning,
+            controlnet_conditioning = ControlNetApplyAdvanced().apply_controlnet(positive, negative,
                                                                           control_net, image, strength,
-                                                                          start_percent, end_percent)[0]
-        return (conditioning_new,)
+                                                                          start_percent, end_percent)
+        return controlnet_conditioning
 
 ########################################################################################################################
 # TSC KSampler (Efficient)
@@ -1379,7 +1381,8 @@ class TSC_KSampler:
                                        empty_latent_height, return_type="base")
                     # Apply ControlNet Stack if given
                     if cnet_stack:
-                        positive = TSC_Apply_ControlNet_Stack().apply_cnet_stack(positive, cnet_stack)
+                        controlnet_conditioning = TSC_Apply_ControlNet_Stack().apply_cnet_stack(positive, negative, cnet_stack)
+                        positive, negative = controlnet_conditioning[0], controlnet_conditioning[1]
 
                 if encode_refiner == True:
                     refiner_positive, refiner_negative = \
@@ -1417,10 +1420,8 @@ class TSC_KSampler:
                         send_command_to_frontend(startListening=True, maxCount=steps - 1, sendBlob=False)
 
                     samples = sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-                                                  latent_image, denoise, sampler_type, add_noise, start_at_step,
-                                                  end_at_step,
-                                                  return_with_leftover_noise, refiner_model, refiner_positive,
-                                                  refiner_negative)
+                                                  latent_image, denoise, sampler_type, add_noise, start_at_step, end_at_step,
+                                                  return_with_leftover_noise, refiner_model, refiner_positive, refiner_negative)
 
                     # Add the latent tensor to the tensors list
                     latent_list.append(samples)
