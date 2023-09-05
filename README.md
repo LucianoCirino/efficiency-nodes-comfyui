@@ -38,7 +38,7 @@ Efficiency Nodes for ComfyUI
 - Node that allows users to specify parameters for the Efficient KSampler's to plot on a grid.
 
 <p align="center">
-  <img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/X-Seeds%20Y-Checkpoints%20(Overview).png?raw=true" width="320">
+  <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20XY%20Plot.png?raw=true" width="320">
 </p>
 
 </details>
@@ -71,13 +71,18 @@ Efficiency Nodes for ComfyUI
 
 ## **Examples:**
   
-- HiResFix using the **Efficient Loader** & **Ksampler (Efficient)**
+- HiResFix using the **Efficient Loader**, **Ksampler (Efficient)**, and **HiResFix Script** nodes
 
 <img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/HiRes Fix (overview).png" width="720">
+
+- SDXL Refining using the **Eff. SDXL Loader**, and **Ksampler SDXL (Eff.)**
+
+<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/SDXL Base+Refine (Overview).png" width="720">
 
 - 2D Plotting using the **XY Plot** & **Ksampler (Efficient)** nodes 
 
 <img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/X-Seeds Y-Checkpoints (overview).png" width="720">
+<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/LoRA Plot X-ModelStr Y-ClipStr (Overview).png" width="720">
 
 - Photobashing using the **Image Overlay** node
 
