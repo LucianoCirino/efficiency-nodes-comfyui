@@ -1,6 +1,7 @@
 import { app } from "/scripts/app.js";
 
 let origProps = {};
+let initialized = false;
 
 const findWidgetByName = (node, name) => {
     return node.widgets ? node.widgets.find((w) => w.name === name) : null;
@@ -10,44 +11,25 @@ const doesInputWithNameExist = (node, name) => {
     return node.inputs ? node.inputs.some((input) => input.name === name) : false;
 };
 
-function computeNodeSizeBasedOnWidgetCount(node) {
-    const DEFAULT_BASE_HEIGHT = 40;
-    const NODE_TITLE_BASE_HEIGHTS = {
-        "XY Input: LoRA Stacks": 110,
-        "XY Input: LoRA Plot": 60,
-        "XY Input: Control Net": 80,
-        "XY Input: Control Net Plot": 80,
-    };
-    const BASE_HEIGHT = NODE_TITLE_BASE_HEIGHTS[node.getTitle()] || DEFAULT_BASE_HEIGHT;
-
-    const WIDGET_HEIGHT = 24;
-    let visibleWidgetCount = 0;
-
-    node.widgets.forEach(widget => {
-        if (widget.type !== "tschide") {
-            visibleWidgetCount++;
-        }
-    });
-
-    return [node.size[0], BASE_HEIGHT + (visibleWidgetCount * WIDGET_HEIGHT)];
-}
-
+const WIDGET_HEIGHT = 24;
 // Toggle Widget + change size
 function toggleWidget(node, widget, show = false, suffix = "") {
     if (!widget || doesInputWithNameExist(node, widget.name)) return;
+    
+    const isCurrentlyVisible = widget.type !== "tschide" + suffix;
+    if (isCurrentlyVisible === show) return; // Early exit if widget is already in the desired state
+
     if (!origProps[widget.name]) {
         origProps[widget.name] = { origType: widget.type, origComputeSize: widget.computeSize };
     }
-    const origSize = node.size;
 
     widget.type = show ? origProps[widget.name].origType : "tschide" + suffix;
     widget.computeSize = show ? origProps[widget.name].origComputeSize : () => [0, -4];
 
-    const height = show ? Math.max(node.computeSize()[1], origSize[1]) : node.size[1];
-    node.setSize([node.size[0], height]);
-
-    // Compute the new size based on widget count and set it
-    node.setSize(computeNodeSizeBasedOnWidgetCount(node));
+    if (initialized){
+        const adjustment = show ? WIDGET_HEIGHT : -WIDGET_HEIGHT;
+        node.setSize([node.size[0], node.size[1] + adjustment]);
+    }
 }
 
 // New function to handle widget visibility based on input_mode
@@ -310,18 +292,26 @@ function widgetLogic(node, widget) {
 
 // Efficient Loader Handlers
 function handleEfficientLoaderLoraName(node, widget) {
-    const action = widget.value === 'None' ? toggleWidget : (node, widget) => toggleWidget(node, widget, true);
-    ['lora_model_strength', 'lora_clip_strength'].forEach(wName => {
-        action(node, findWidgetByName(node, wName));
-    });
+    if (widget.value === 'None') {       
+        toggleWidget(node, findWidgetByName(node, 'lora_model_strength'));
+        toggleWidget(node, findWidgetByName(node, 'lora_clip_strength'));
+    } else {
+        toggleWidget(node, findWidgetByName(node, 'lora_model_strength'), true);
+        toggleWidget(node, findWidgetByName(node, 'lora_clip_strength'), true);
+    }
 }
 
 // Eff. Loader SDXL Handlers
 function handleEffLoaderSDXLRefinerCkptName(node, widget) {
-    const action = widget.value === 'None' ? toggleWidget : (node, widget) => toggleWidget(node, widget, true);
-    ['refiner_clip_skip', 'positive_ascore', 'negative_ascore'].forEach(wName => {
-        action(node, findWidgetByName(node, wName));
-    });
+    if (widget.value === 'None') {
+        toggleWidget(node, findWidgetByName(node, 'refiner_clip_skip'));
+        toggleWidget(node, findWidgetByName(node, 'positive_ascore'));
+        toggleWidget(node, findWidgetByName(node, 'negative_ascore'));
+    } else {
+        toggleWidget(node, findWidgetByName(node, 'refiner_clip_skip'), true);
+        toggleWidget(node, findWidgetByName(node, 'positive_ascore'), true);
+        toggleWidget(node, findWidgetByName(node, 'negative_ascore'), true);
+    }
 }
 
 // LoRA Stacker Handlers
@@ -423,7 +413,7 @@ app.registerExtension({
             // Store the original descriptor if it exists
             let originalDescriptor = Object.getOwnPropertyDescriptor(w, 'value');
 
-            widgetLogic(node, w);
+            widgetLogic(node, w)
 
             Object.defineProperty(w, 'value', {
                 get() {
@@ -447,6 +437,7 @@ app.registerExtension({
                 }
             });
         }
+        setTimeout(() => {initialized = true;}, 2000);
     }
 });
 
