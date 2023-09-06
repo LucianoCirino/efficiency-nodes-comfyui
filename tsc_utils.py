@@ -172,7 +172,7 @@ def globals_cleanup(prompt):
                     loaded_objects[key].remove(tup)
                     ###print(f'Deleted tuple at index {i} in {key} in loaded_objects because its id array became empty.')
 
-def load_checkpoint(ckpt_name, id, output_vae=True, cache=None, cache_overwrite=False, ckpt_type="ckpt"):
+def load_checkpoint(ckpt_name, id, output_vae=True, cache=None, cache_overwrite=True, ckpt_type="ckpt"):
     global loaded_objects
 
     # Create copies of the arguments right at the start
@@ -321,7 +321,7 @@ def load_lora(lora_params, ckpt_name, id, cache=None, ckpt_cache=None, cache_ove
 
     # Unpack lora parameters from the first element of the list for now
     lora_name, strength_model, strength_clip = lora_params[0]
-    ckpt, clip, _ = load_checkpoint(ckpt_name, id, cache=ckpt_cache, cache_overwrite=cache_overwrite)
+    ckpt, clip, _ = load_checkpoint(ckpt_name, id, cache=ckpt_cache)
 
     lora_model, lora_clip = recursive_load_lora(lora_params, ckpt, clip, id, ckpt_cache, cache_overwrite, folder_paths)
 
