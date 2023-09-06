@@ -137,7 +137,7 @@ function handleInputModeWidgetsVisibility(node, inputModeValue) {
 }
 
 // Handle multi-widget visibilities
-function handleVisibility(node, countValue, mode) {
+function handleVisibility(node, countValue, node_type) {
     const inputModeValue = findWidgetByName(node, "input_mode").value;
     const baseNamesMap = {
         "LoRA": ["lora_name", "model_str", "clip_str"],
@@ -145,23 +145,21 @@ function handleVisibility(node, countValue, mode) {
         "LoRA Stacker": ["lora_name", "model_str", "clip_str", "lora_wt"]
     };
 
-    const baseNames = baseNamesMap[mode];
+    const baseNames = baseNamesMap[node_type];
 
     const isBatchMode = inputModeValue.includes("Batch");
-    if (isBatchMode) {
-        countValue = 0;
-    }
+    if (isBatchMode) {countValue = 0;}
 
     for (let i = 1; i <= 50; i++) {
         const nameWidget = findWidgetByName(node, `${baseNames[0]}_${i}`);
         const firstWidget = findWidgetByName(node, `${baseNames[1]}_${i}`);
         const secondWidget = findWidgetByName(node, `${baseNames[2]}_${i}`);
-        const thirdWidget = mode === "LoRA Stacker" ? findWidgetByName(node, `${baseNames[3]}_${i}`) : null;
+        const thirdWidget = node_type === "LoRA Stacker" ? findWidgetByName(node, `${baseNames[3]}_${i}`) : null;
 
         if (i <= countValue) {
             toggleWidget(node, nameWidget, true);
 
-            if (mode === "LoRA Stacker") {
+            if (node_type === "LoRA Stacker") {
                 if (inputModeValue === "simple") {
                     toggleWidget(node, firstWidget, false);   // model_str
                     toggleWidget(node, secondWidget, false); // clip_str
@@ -171,20 +169,21 @@ function handleVisibility(node, countValue, mode) {
                     toggleWidget(node, secondWidget, true);  // clip_str
                     toggleWidget(node, thirdWidget, false);   // lora_wt
                 }
-            } else if (inputModeValue.includes("Names+Weights") || inputModeValue.includes("+ClipSkip")) {
-                toggleWidget(node, firstWidget, true);
-                if (inputModeValue.includes("+VAE")){toggleWidget(node, secondWidget, true);}
+            } else if (node_type === "Checkpoint") {
+                if (inputModeValue.includes("ClipSkip")){toggleWidget(node, firstWidget, true);}
+                if (inputModeValue.includes("VAE")){toggleWidget(node, secondWidget, true);}
+            } else if (node_type === "LoRA") {
+                if (inputModeValue.includes("Weights")){
+                    toggleWidget(node, firstWidget, true);
+                    toggleWidget(node, secondWidget, true);
+                }
             }
-            if (!inputModeValue.includes("Names") && mode !== "LoRA Stacker") {
-                toggleWidget(node, secondWidget, true);
-            }
-        } else {
+        }
+        else {
             toggleWidget(node, nameWidget, false);
             toggleWidget(node, firstWidget, false);
             toggleWidget(node, secondWidget, false);
-            if (thirdWidget) {
-                toggleWidget(node, thirdWidget, false);
-            }
+            if (thirdWidget) {toggleWidget(node, thirdWidget, false);}
         }
     }
 }
