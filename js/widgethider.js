@@ -413,7 +413,7 @@ app.registerExtension({
             // Store the original descriptor if it exists
             let originalDescriptor = Object.getOwnPropertyDescriptor(w, 'value');
 
-            widgetLogic(node, w)
+            widgetLogic(node, w);
 
             Object.defineProperty(w, 'value', {
                 get() {
