@@ -1590,10 +1590,11 @@ class TSC_KSampler:
                         vae_name = ""
                     return vae_name
 
-                def get_clip_skip(X_type, Y_type, X_value, Y_value, cskip):
-                    if "Clip Skip" in X_type:
+                def get_clip_skip(X_type, Y_type, X_value, Y_value, cskip, mode):
+                    clip_type = "Clip Skip" if mode == "ckpt" else "Clip Skip (Refiner)"
+                    if X_type == clip_type:
                         cskip = ", ".join(map(str, X_value))
-                    elif "Clip Skip" in Y_type:
+                    elif Y_type == clip_type:
                         cskip = ", ".join(map(str, Y_value))
                     elif cskip[1] != None:
                         cskip = cskip[1]
@@ -1620,10 +1621,10 @@ class TSC_KSampler:
                         othr_type, othr_value = X_type, X_value.copy()
                     else:
                         # Process as per original function if mode is "ckpt"
+                        clip_skip = get_clip_skip(X_type, Y_type, X_value, Y_value, clip_skip, mode)
                         if mode == "ckpt":
                             if vae_name:
                                 vae_name = get_vae_name(X_type, Y_type, X_value, Y_value, vae_name)
-                            clip_skip = get_clip_skip(X_type, Y_type, X_value, Y_value, clip_skip)
                             return ckpt_name, clip_skip, vae_name
                         else:
                             # For refn mode
