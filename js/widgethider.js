@@ -173,6 +173,7 @@ function handleVisibility(node, countValue, mode) {
                 }
             } else if (inputModeValue.includes("Names+Weights") || inputModeValue.includes("+ClipSkip")) {
                 toggleWidget(node, firstWidget, true);
+                if (inputModeValue.includes("+VAE")){toggleWidget(node, secondWidget, true);}
             }
             if (!inputModeValue.includes("Names") && mode !== "LoRA Stacker") {
                 toggleWidget(node, secondWidget, true);
