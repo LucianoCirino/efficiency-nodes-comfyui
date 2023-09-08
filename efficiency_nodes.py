@@ -28,7 +28,8 @@ font_path = os.path.join(my_dir, 'arial.ttf')
 
 # Append comfy_dir to sys.path & import files
 sys.path.append(comfy_dir)
-from nodes import LatentUpscaleBy, KSampler, KSamplerAdvanced, VAEDecode, VAEDecodeTiled, CLIPSetLastLayer, CLIPTextEncode, ControlNetApplyAdvanced
+from nodes import LatentUpscaleBy, KSampler, KSamplerAdvanced, VAEDecode, VAEDecodeTiled, VAEEncode, VAEEncodeTiled, \
+    ImageScaleBy, CLIPSetLastLayer, CLIPTextEncode, ControlNetLoader, ControlNetApply, ControlNetApplyAdvanced
 from comfy_extras.nodes_clip_sdxl import CLIPTextEncodeSDXL, CLIPTextEncodeSDXLRefiner
 import comfy.samplers
 import comfy.sd
@@ -370,10 +371,11 @@ class TSC_Apply_ControlNet_Stack:
     def apply_cnet_stack(self, positive, negative, cnet_stack):
         for control_net_tuple in cnet_stack:
             control_net, image, strength, start_percent, end_percent = control_net_tuple
-            controlnet_conditioning = ControlNetApplyAdvanced().apply_controlnet(positive, negative,
-                                                                          control_net, image, strength,
-                                                                          start_percent, end_percent)
-        return controlnet_conditioning
+            controlnet_conditioning = ControlNetApplyAdvanced().apply_controlnet(positive, negative, control_net, image,
+                                                                                 strength, start_percent, end_percent)
+            positive, negative = controlnet_conditioning[0], controlnet_conditioning[1]
+
+        return (positive, negative, )
 
 ########################################################################################################################
 # TSC KSampler (Efficient)
@@ -388,7 +390,7 @@ class TSC_KSampler:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required":
-                    {"sampler_state": (["Sample", "Hold", "Script"], ),
+                    {"sampler_state": (["Sample", "Script", "Hold"], ),
                      "model": ("MODEL",),
                      "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                      "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
@@ -529,36 +531,23 @@ class TSC_KSampler:
         def vae_decode_latent(vae, samples, vae_decode):
             return VAEDecodeTiled().decode(vae,samples,512)[0] if "tiled" in vae_decode else VAEDecode().decode(vae,samples)[0]
 
+        def vae_encode_image(vae, pixels, vae_decode):
+            return VAEEncodeTiled().encode(vae,pixels,512)[0] if "tiled" in vae_decode else VAEEncode().encode(vae,pixels)[0]
+
         # ---------------------------------------------------------------------------------------------------------------
         def sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
                                 denoise, sampler_type, add_noise, start_at_step, end_at_step, return_with_leftover_noise,
-                                refiner_model=None, refiner_positive=None, refiner_negative=None):
-
-            if keys_exist_in_script("tile"):
-                tile_width, tile_height, tiling_strategy, blenderneko_tiled_nodes = script["tile"]
-                TSampler = blenderneko_tiled_nodes.TiledKSampler
-                TSamplerAdvanced = blenderneko_tiled_nodes.TiledKSamplerAdvanced
+                                refiner_model, refiner_positive, refiner_negative, vae, vae_decode, sampler_state):
 
             # Sample the latent_image(s) using the Comfy KSampler nodes
             if sampler_type == "regular":
-                if keys_exist_in_script("tile"):
-                    samples = TSampler().sample(model, seed, tile_width, tile_height, tiling_strategy, steps, cfg,
-                                                sampler_name, scheduler, positive, negative,
-                                                latent_image, denoise=denoise)[0]
-                else:
-                    samples = KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-                                                latent_image, denoise=denoise)[0]
+                samples = KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
+                                            latent_image, denoise=denoise)[0]
 
             elif sampler_type == "advanced":
-                if keys_exist_in_script("tile"):
-                    samples = TSamplerAdvanced().sample(model, add_noise, seed, tile_width, tile_height, tiling_strategy,
-                                                        steps, cfg, sampler_name, scheduler,
-                                                        positive, negative, latent_image, start_at_step, end_at_step,
-                                                        return_with_leftover_noise, "disabled", denoise=1.0)[0]
-                else:
-                    samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler,
-                                                        positive, negative, latent_image, start_at_step, end_at_step,
-                                                        return_with_leftover_noise, denoise=1.0)[0]
+                samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler,
+                                                    positive, negative, latent_image, start_at_step, end_at_step,
+                                                    return_with_leftover_noise, denoise=1.0)[0]
 
             elif sampler_type == "sdxl":
                 # Disable refiner if refine_at_step is -1
@@ -579,24 +568,35 @@ class TSC_KSampler:
                                                         samples, end_at_step, steps,
                                                         return_with_leftover_noise, denoise=1.0)[0]
 
-            # Check if "hiresfix" exists in the script after main sampling has taken place
-            if keys_exist_in_script("hiresfix"):
+            if sampler_state == "Script":
 
-                # Unpack the tuple from the script's "hiresfix" key
-                latent_upscale_method, upscale_by, hires_steps, hires_denoise, iterations, upscale_function = script["hiresfix"]
-
-                # Iterate for the given number of iterations
-                for _ in range(iterations):
-                    upscaled_latent_image = upscale_function().upscale(samples, latent_upscale_method, upscale_by)[0]
-                    # Use the regular KSampler for each iteration
-                    if False: #if keys_exist_in_script("tile"):  # Disabled for HiResFix
-                        samples = TSampler().sample(model, seed, tile_width, tile_height, tiling_strategy, steps, cfg,
-                                                    sampler_name, scheduler,
-                                                    positive, negative, upscaled_latent_image, denoise=hires_denoise)[0]
-                    else:
+                # Check if "hiresfix" exists in the script after main sampling has taken place
+                if keys_exist_in_script("hiresfix"):
+                    # Unpack the tuple from the script's "hiresfix" key
+                    latent_upscale_method, upscale_by, hires_steps, hires_denoise, iterations, upscale_function = script["hiresfix"]
+                    # Iterate for the given number of iterations
+                    for _ in range(iterations):
+                        upscaled_latent_image = upscale_function().upscale(samples, latent_upscale_method, upscale_by)[0]
                         samples = KSampler().sample(model, seed, hires_steps, cfg, sampler_name, scheduler,
-                                                    positive, negative, upscaled_latent_image, denoise=hires_denoise)[0]
+                                                        positive, negative, upscaled_latent_image, denoise=hires_denoise)[0]
 
+                # Check if "tile" exists in the script after main sampling has taken place
+                if keys_exist_in_script("tile"):
+                    # Unpack the tuple from the script's "tile" key
+                    upscale_by, tile_controlnet, tile_size, tiling_strategy, tiling_steps, tiled_denoise,\
+                        blenderneko_tiled_nodes = script["tile"]
+                    # VAE Decode samples
+                    image = vae_decode_latent(vae, samples, vae_decode)
+                    # Upscale image
+                    upscaled_image = ImageScaleBy().upscale(image, "nearest-exact", upscale_by)[0]
+                    upscaled_latent = vae_encode_image(vae, upscaled_image, vae_decode)
+                    # Apply Control Net using upscaled_image and loaded control_net
+                    positive = ControlNetApply().apply_controlnet(positive, tile_controlnet, upscaled_image, 1)[0]
+                    # Sample latent
+                    TSampler = blenderneko_tiled_nodes.TiledKSampler
+                    samples = TSampler().sample(model, seed-1, tile_size, tile_size, tiling_strategy, tiling_steps, cfg,
+                                                sampler_name, scheduler, positive, negative, upscaled_latent,
+                                                denoise=tiled_denoise)[0]
             return samples
 
         # ---------------------------------------------------------------------------------------------------------------
@@ -640,8 +640,9 @@ class TSC_KSampler:
                 send_command_to_frontend(startListening=True, maxCount=steps-1, sendBlob=False)
 
             samples = sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-                                            latent_image, denoise, sampler_type, add_noise, start_at_step, end_at_step,
-                                            return_with_leftover_noise, refiner_model, refiner_positive, refiner_negative)
+                                          latent_image, denoise, sampler_type, add_noise, start_at_step, end_at_step,
+                                          return_with_leftover_noise, refiner_model, refiner_positive, refiner_negative,
+                                          vae, vae_decode, sampler_state)
 
             # Cache samples in the 'last_helds' dictionary "latent"
             update_value_by_id("latent", my_unique_id, samples)
@@ -1421,7 +1422,8 @@ class TSC_KSampler:
 
                     samples = sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
                                                   latent_image, denoise, sampler_type, add_noise, start_at_step, end_at_step,
-                                                  return_with_leftover_noise, refiner_model, refiner_positive, refiner_negative)
+                                                  return_with_leftover_noise, refiner_model, refiner_positive, refiner_negative,
+                                                  vae, vae_decode, sampler_state)
 
                     # Add the latent tensor to the tensors list
                     latent_list.append(samples)
@@ -1490,7 +1492,6 @@ class TSC_KSampler:
                                     return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name,
                                     ckpt_name, clip_skip, refiner_name, refiner_clip_skip, positive_prompt,
                                     negative_prompt, ascore, lora_stack, cnet_stack, X_label, len(X_value))
-
 
                 if X_type != "Nothing" and Y_type == "Nothing":
                     if X_type == "XY_Capsule":
@@ -3309,7 +3310,7 @@ class TSC_XYplot_Control_Net_End:
 
 # =======================================================================================================================
 # TSC XY Plot: Control Net
-class TSC_XYplot_Control_Net:
+class TSC_XYplot_Control_Net(TSC_XYplot_Control_Net_Strength, TSC_XYplot_Control_Net_Start, TSC_XYplot_Control_Net_End):
     parameters = ["strength", "start_percent", "end_percent"]
     @classmethod
     def INPUT_TYPES(cls):
@@ -3326,7 +3327,7 @@ class TSC_XYplot_Control_Net:
                 "first_end_percent": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 1.0, "step": 0.01}),
                 "last_end_percent": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
                 "strength": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 10.0, "step": 0.01}),
-                "start_percent": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
+                "start_percent": ("FLOAT", {"default": 0.0, "min": 0.00, "max": 1.0, "step": 0.01}),
                 "end_percent": ("FLOAT", {"default": 1.0, "min": 0.00, "max": 1.0, "step": 0.01}),
             },
             "optional": {"cnet_stack": ("CONTROL_NET_STACK",)},
@@ -3338,10 +3339,17 @@ class TSC_XYplot_Control_Net:
     CATEGORY = "Efficiency Nodes/XY Inputs"
 
     def xy_value(self, control_net, image, target_parameter, batch_count, first_strength, last_strength, first_start_percent,
-                 last_start_percent, first_end_percent, last_end_percent, strength, start_percent, cnet_stack=None):
+                 last_start_percent, first_end_percent, last_end_percent, strength, start_percent, end_percent, cnet_stack=None):
 
-
-        return ((xy_type, xy_value),)
+        if target_parameter == "strength":
+            return TSC_XYplot_Control_Net_Strength.xy_value(self, control_net, image, batch_count, first_strength,
+                                                            last_strength, start_percent, end_percent, cnet_stack=cnet_stack)
+        elif target_parameter == "start_percent":
+            return TSC_XYplot_Control_Net_Start.xy_value(self, control_net, image, batch_count, first_start_percent,
+                                                         last_start_percent, strength, end_percent, cnet_stack=cnet_stack)
+        elif target_parameter == "end_percent":
+            return TSC_XYplot_Control_Net_End.xy_value(self, control_net, image, batch_count, first_end_percent,
+                                                       last_end_percent, strength, start_percent, cnet_stack=cnet_stack)
 
 #=======================================================================================================================
 # TSC XY Plot: Control Net Plot
@@ -4007,8 +4015,8 @@ NODE_CLASS_MAPPINGS = {
     "XY Input: LoRA Stacks": TSC_XYplot_LoRA_Stacks,
     "XY Input: Control Net": TSC_XYplot_Control_Net,
     "XY Input: Control Net Plot": TSC_XYplot_Control_Net_Plot,
-    "XY Input: Manual XY Entry": TSC_XYplot_Manual_XY_Entry, # DISABLED, NEEDS UPDATE
-    "Manual XY Entry Info": TSC_XYplot_Manual_XY_Entry_Info, # DISABLED, NEEDS UPDATE
+    "XY Input: Manual XY Entry": TSC_XYplot_Manual_XY_Entry,
+    "Manual XY Entry Info": TSC_XYplot_Manual_XY_Entry_Info,
     "Join XY Inputs of Same Type": TSC_XYplot_JoinInputs,
     "Image Overlay": TSC_ImageOverlay
 }
@@ -4107,7 +4115,7 @@ class TSC_HighRes_Fix:
 NODE_CLASS_MAPPINGS.update({"HighRes-Fix Script": TSC_HighRes_Fix})
 
 ########################################################################################################################
-'''# FUTURE
+'''
 # Tiled Sampling KSamplers (https://github.com/BlenderNeko/ComfyUI_TiledKSampler)
 blenderneko_tiled_ksampler_path = os.path.join(custom_nodes_dir, "ComfyUI_TiledKSampler")
 if os.path.exists(blenderneko_tiled_ksampler_path):
@@ -4117,14 +4125,20 @@ if os.path.exists(blenderneko_tiled_ksampler_path):
         blenderneko_tiled_nodes = import_module("ComfyUI_TiledKSampler.nodes")
         print(f"\r{message('Efficiency Nodes:')} {printout}{success('Success!')}")
 
-        # TSC Tiled Sampling
-        class TSC_Tiled_Sampling:
-
+        # TSC Tiled Upscaler
+        class TSC_Tiled_Upscaler:
             @classmethod
             def INPUT_TYPES(cls):
-                return {"required": {"tile_width": ("INT", {"default": 512, "min": 256, "max": MAX_RESOLUTION, "step": 64}),
-                                     "tile_height": ("INT", {"default": 512, "min": 256, "max": MAX_RESOLUTION, "step": 64}),
+                # Split the list based on the keyword "tile"
+                cnet_tile_filenames = [name for name in folder_paths.get_filename_list("controlnet") if "tile" in name]
+                cnet_other_filenames = [name for name in folder_paths.get_filename_list("controlnet") if "tile" not in name]
+                
+                return {"required": {"tile_controlnet": (cnet_tile_filenames + cnet_other_filenames,),
+                                     "upscale_by": ("FLOAT", {"default": 1.25, "min": 0.01, "max": 8.0, "step": 0.25}),
+                                     "tile_size": ("INT", {"default": 512, "min": 256, "max": MAX_RESOLUTION, "step": 64}),
                                      "tiling_strategy": (["random", "random strict", "padded", 'simple', 'none'],),
+                                     "tiling_steps": ("INT", {"default": 30, "min": 1, "max": 10000}),
+                                     "denoise": ("FLOAT", {"default": .56, "min": 0.0, "max": 1.0, "step": 0.01}),
                                      },
                         "optional": {"script": ("SCRIPT",)}}
 
@@ -4132,13 +4146,14 @@ if os.path.exists(blenderneko_tiled_ksampler_path):
             FUNCTION = "tiled_sampling"
             CATEGORY = "Efficiency Nodes/Scripts"
 
-            def tiled_sampling(self, tile_width, tile_height, tiling_strategy, script=None):
+            def tiled_sampling(self, upscale_by, tile_controlnet, tile_size, tiling_strategy, tiling_steps, denoise, script=None):
                 if tiling_strategy != 'none':
                     script = script or {}
-                    script["tile"] = (tile_width, tile_height, tiling_strategy, blenderneko_tiled_nodes)
+                    script["tile"] = (upscale_by, ControlNetLoader().load_controlnet(tile_controlnet)[0],
+                                      tile_size, tiling_strategy, tiling_steps, denoise, blenderneko_tiled_nodes)
                 return (script,)
 
-        NODE_CLASS_MAPPINGS.update({"Tiled Sampling Script": TSC_Tiled_Sampling})
+        NODE_CLASS_MAPPINGS.update({"Tiled Upscaler Script": TSC_Tiled_Upscaler})
 
     except ImportError:
         print(f"\r{message('Efficiency Nodes:')} {printout}{error('Failed!')}")
