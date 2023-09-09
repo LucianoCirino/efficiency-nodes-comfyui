@@ -522,7 +522,7 @@ install_packages(my_dir)
 
 #-----------------------------------------------------------------------------------------------------------------------
 # Delete efficiency nodes web extensions from 'ComfyUI\web\extensions'.
-# PR from https://github.com/comfyanonymous/ComfyUI/pull/1273 now allows defining web extensions through a dir path in
+# Pull https://github.com/comfyanonymous/ComfyUI/pull/1273 now allows defining web extensions through a dir path in init
 import shutil
 
 # Destination directory
