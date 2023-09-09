@@ -521,33 +521,16 @@ def packages(python_exe=None, versions=False):
 install_packages(my_dir)
 
 #-----------------------------------------------------------------------------------------------------------------------
-# Auto install efficiency nodes web extensions '\js\' to 'ComfyUI\web\extensions'
+# Delete efficiency nodes web extensions from 'ComfyUI\web\extensions'.
+# Pull https://github.com/comfyanonymous/ComfyUI/pull/1273 now allows defining web extensions through a dir path in init
 import shutil
 
-# Source and destination directories
-source_dir = os.path.join(my_dir, 'js')
+# Destination directory
 destination_dir = os.path.join(comfy_dir, 'web', 'extensions', 'efficiency-nodes-comfyui')
 
-# Create the destination directory if it doesn't exist
-os.makedirs(destination_dir, exist_ok=True)
-
-# Get a list of all .js files in the source directory
-source_files = [f for f in os.listdir(source_dir) if f.endswith('.js')]
-
-# Clear files in the destination directory that aren't in the source directory
-for file_name in os.listdir(destination_dir):
-    if file_name not in source_files and file_name.endswith('.js'):
-        file_path = os.path.join(destination_dir, file_name)
-        os.unlink(file_path)
-
-# Iterate over all files in the source directory for copying
-for file_name in source_files:
-    # Full paths for source and destination
-    source_path = os.path.join(source_dir, file_name)
-    destination_path = os.path.join(destination_dir, file_name)
-
-    # Directly copy the file (this will overwrite if the file already exists)
-    shutil.copy2(source_path, destination_path)
+# Check if the directory exists and delete it
+if os.path.exists(destination_dir):
+    shutil.rmtree(destination_dir)
 
 #-----------------------------------------------------------------------------------------------------------------------
 # Establish a websocket connection to communicate with "efficiency-nodes.js" under:
