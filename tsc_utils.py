@@ -489,33 +489,38 @@ def install_packages(my_dir):
     with open(os.path.join(my_dir, 'requirements.txt'), 'r') as f:
         required_packages = [line.strip() for line in f if line.strip()]
 
-    installed_packages = packages(embedded_python_exe if use_embedded else None, versions=False)
-    for pkg in required_packages:
-        if pkg not in installed_packages:
-            print(f"\033[32mEfficiency Nodes:\033[0m Installing required package '{pkg}'...", end='', flush=True)
-            try:
+    try:
+        installed_packages = packages(embedded_python_exe if use_embedded else None, versions=False)
+
+        for pkg in required_packages:
+            if pkg not in installed_packages:
+                printout = f"Installing required package '{pkg}'..."
+                print(f"{message('Efficiency Nodes:')} {printout}", end='', flush=True)
                 if use_embedded:  # Targeted installation
                     subprocess.check_call(['pip', 'install', pkg, '--target=' + target_dir, '--no-warn-script-location',
-                                           '--disable-pip-version-check'], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                           '--disable-pip-version-check'], stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.PIPE)
                 else:  # Untargeted installation
                     subprocess.check_call(['pip', 'install', pkg], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                print(f"\r\033[32mEfficiency Nodes:\033[0m Installing required package '{pkg}'... Installed!", flush=True)
+                print(f"\r{message('Efficiency Nodes:')} {printout}{success('Installed!')}", flush=True)
 
-            except subprocess.CalledProcessError as e: # Failed installation
-                base_message = f"\r\033[31mEfficiency Nodes Error:\033[0m Failed to install python package '{pkg}'. "
-                if e.stderr:
-                    error_message = e.stderr.decode()
-                    print(base_message + f"Error message: {error_message}")
-                else:
-                    print(base_message + "\nPlease check your permissions, network connectivity, or try a manual installation.")
+    except Exception as e:  # This catches all exceptions derived from the base Exception class
+        print_general_error_message()
 
 def packages(python_exe=None, versions=False):
-    # Get packages of the active or embedded Python environment
-    if python_exe:
-        return [(r.decode().split('==')[0] if not versions else r.decode()) for r in
-                subprocess.check_output([python_exe, '-m', 'pip', 'freeze']).split()]
-    else:
-        return [(r.split('==')[0] if not versions else r) for r in subprocess.getoutput('pip freeze').splitlines()]
+    try:
+        if python_exe:
+            return [(r.decode().split('==')[0] if not versions else r.decode()) for r in
+                    subprocess.check_output([python_exe, '-m', 'pip', 'freeze']).split()]
+        else:
+            return [(r.split('==')[0] if not versions else r) for r in subprocess.getoutput('pip freeze').splitlines()]
+    except subprocess.CalledProcessError as e:
+        raise e  # re-raise the error to handle it outside
+
+def print_general_error_message():
+    print(
+        f"\r{message('Efficiency Nodes:')} An unexpected error occurred during the package installation process. {error('Failed!')}")
+    print(warning("Please try manually installing the required packages from the requirements.txt file."))
 
 # Install missing packages
 install_packages(my_dir)
