@@ -484,7 +484,7 @@ def install_packages(my_dir):
     embedded_python_exe = os.path.abspath(os.path.join(my_dir, '..', '..', '..', 'python_embeded', 'python.exe'))
 
     # If embedded_python_exe exists, target the installations. Otherwise, go untargeted.
-    use_embedded = os.path.exists(embedded_python_exe)
+    use_embedded = os.path.exists(embedded_python_exe) and embedded_python_exe == sys.executable
 
     # Load packages from requirements.txt
     with open(os.path.join(my_dir, 'requirements.txt'), 'r') as f:
