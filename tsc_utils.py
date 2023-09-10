@@ -472,10 +472,11 @@ def global_preview_method():
 #-----------------------------------------------------------------------------------------------------------------------
 # Auto install Efficiency Nodes Python package dependencies
 import subprocess
-# Note: Auto installer install packages inside the requirements.txt.
-#       It first trys ComfyUI's python_embedded folder if python.exe exists inside ...\ComfyUI_windows_portable\python_embeded.
-#       If no python.exe is found, it attempts a general global pip install of packages.
-#       On an error, an user is directed to attempt manually installing the packages themselves.
+# Note: This auto-installer installs packages listed in the requirements.txt.
+#       It first checks if python.exe exists inside the ...\ComfyUI_windows_portable\python_embeded directory.
+#       If python.exe is found in that location, it will use this embedded Python version for the installation.
+#       Otherwise, it uses the Python interpreter that's currently executing the script (via sys.executable) to attempt a general pip install of the packages.
+#       If any errors occur during installation, the user is directed to manually install the required packages.
 
 def install_packages(my_dir):
     # Compute path to the target site-packages
@@ -496,12 +497,15 @@ def install_packages(my_dir):
             if pkg not in installed_packages:
                 printout = f"Installing required package '{pkg}'..."
                 print(f"{message('Efficiency Nodes:')} {printout}", end='', flush=True)
+
                 if use_embedded:  # Targeted installation
-                    subprocess.check_call(['pip', 'install', pkg, '--target=' + target_dir, '--no-warn-script-location',
-                                           '--disable-pip-version-check'], stdout=subprocess.DEVNULL,
-                                          stderr=subprocess.PIPE)
+                    subprocess.check_call([embedded_python_exe, '-m', 'pip', 'install', pkg, '--target=' + target_dir,
+                                           '--no-warn-script-location', '--disable-pip-version-check'],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 else:  # Untargeted installation
-                    subprocess.check_call(['pip', 'install', pkg], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    subprocess.check_call([sys.executable, "-m", "pip", 'install', pkg],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
                 print(f"\r{message('Efficiency Nodes:')} {printout}{success('Installed!')}", flush=True)
 
     except Exception as e:  # This catches all exceptions derived from the base Exception class
@@ -513,7 +517,8 @@ def packages(python_exe=None, versions=False):
             return [(r.decode().split('==')[0] if not versions else r.decode()) for r in
                     subprocess.check_output([python_exe, '-m', 'pip', 'freeze']).split()]
         else:
-            return [(r.split('==')[0] if not versions else r) for r in subprocess.getoutput('pip freeze').splitlines()]
+            return [(r.split('==')[0] if not versions else r) for r in
+                    subprocess.getoutput([sys.executable, "-m", "pip", "freeze"]).splitlines()]
     except subprocess.CalledProcessError as e:
         raise e  # re-raise the error to handle it outside
 
