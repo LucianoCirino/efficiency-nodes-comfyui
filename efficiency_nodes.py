@@ -82,11 +82,11 @@ def encode_prompts(positive_prompt, negative_prompt, clip, clip_skip, refiner_cl
                                                                       empty_latent_height, negative_prompt)[0]
     # Return results based on return_type
     if return_type == "base":
-        return positive_encoded, negative_encoded
+        return positive_encoded, negative_encoded, clip
     elif return_type == "refiner":
-        return refiner_positive_encoded, refiner_negative_encoded
+        return refiner_positive_encoded, refiner_negative_encoded, refiner_clip
     elif return_type == "both":
-        return positive_encoded, negative_encoded, refiner_positive_encoded, refiner_negative_encoded
+        return positive_encoded, negative_encoded, clip, refiner_positive_encoded, refiner_negative_encoded, refiner_clip
 
 ########################################################################################################################
 # TSC Efficient Loader
@@ -163,7 +163,7 @@ class TSC_EfficientLoader:
         clip_skip = clip_skip[0] if loader_type == "sdxl" else clip_skip
 
         # Encode prompt based on loader_type
-        positive_encoded, negative_encoded, refiner_positive_encoded, refiner_negative_encoded = \
+        positive_encoded, negative_encoded, clip, refiner_positive_encoded, refiner_negative_encoded, refiner_clip = \
             encode_prompts(positive, negative, clip, clip_skip, refiner_clip, refiner_clip_skip, ascore,
                            loader_type == "sdxl", empty_latent_width, empty_latent_height)
 
@@ -1376,7 +1376,7 @@ class TSC_KSampler:
 
                 # Encode base prompt
                 if encode == True:
-                    positive, negative = \
+                    positive, negative, clip = \
                         encode_prompts(positive_prompt, negative_prompt, clip, clip_skip, refiner_clip,
                                        refiner_clip_skip, ascore, sampler_type == "sdxl", empty_latent_width,
                                        empty_latent_height, return_type="base")
@@ -1386,7 +1386,7 @@ class TSC_KSampler:
                         positive, negative = controlnet_conditioning[0], controlnet_conditioning[1]
 
                 if encode_refiner == True:
-                    refiner_positive, refiner_negative = \
+                    refiner_positive, refiner_negative, refiner_clip = \
                         encode_prompts(positive_prompt, negative_prompt, clip, clip_skip, refiner_clip,
                                        refiner_clip_skip, ascore, sampler_type == "sdxl", empty_latent_width,
                                        empty_latent_height, return_type="refiner")
