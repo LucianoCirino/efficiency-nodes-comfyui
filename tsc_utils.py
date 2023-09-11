@@ -472,11 +472,20 @@ def global_preview_method():
 #-----------------------------------------------------------------------------------------------------------------------
 # Auto install Efficiency Nodes Python package dependencies
 import subprocess
-# Note: This auto-installer installs packages listed in the requirements.txt.
+# Note: This auto-installer attempts to import packages listed in the requirements.txt.
+#       If the import fails, indicating the package isn't installed, the installer proceeds to install the package.
 #       It first checks if python.exe exists inside the ...\ComfyUI_windows_portable\python_embeded directory.
 #       If python.exe is found in that location, it will use this embedded Python version for the installation.
-#       Otherwise, it uses the Python interpreter that's currently executing the script (via sys.executable) to attempt a general pip install of the packages.
-#       If any errors occur during installation, the user is directed to manually install the required packages.
+#       Otherwise, it uses the Python interpreter that's currently executing the script (via sys.executable)
+#       to attempt a general pip install of the packages. If any errors occur during installation, an error message is
+#       printed with the reason for the failure, and the user is directed to manually install the required packages.
+
+def is_package_installed(pkg_name):
+    try:
+        __import__(pkg_name)
+        return True
+    except ImportError:
+        return False
 
 def install_packages(my_dir):
     # Compute path to the target site-packages
@@ -490,41 +499,26 @@ def install_packages(my_dir):
     with open(os.path.join(my_dir, 'requirements.txt'), 'r') as f:
         required_packages = [line.strip() for line in f if line.strip()]
 
-    try:
-        installed_packages = packages(embedded_python_exe if use_embedded else None, versions=False)
+    for pkg in required_packages:
+        if not is_package_installed(pkg):
+            printout = f"Installing required package '{pkg}'..."
+            print(f"{message('Efficiency Nodes:')} {printout}", end='', flush=True)
 
-        for pkg in required_packages:
-            if pkg not in installed_packages:
-                printout = f"Installing required package '{pkg}'..."
-                print(f"{message('Efficiency Nodes:')} {printout}", end='', flush=True)
-
+            try:
                 if use_embedded:  # Targeted installation
                     subprocess.check_call([embedded_python_exe, '-m', 'pip', 'install', pkg, '--target=' + target_dir,
                                            '--no-warn-script-location', '--disable-pip-version-check'],
-                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=7)
                 else:  # Untargeted installation
                     subprocess.check_call([sys.executable, "-m", "pip", 'install', pkg],
-                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-
-                print(f"\r{message('Efficiency Nodes:')} {printout}{success('Installed!')}", flush=True)
-
-    except Exception as e:  # This catches all exceptions derived from the base Exception class
-        print_general_error_message()
-
-def packages(python_exe=None, versions=False):
-    try:
-        if python_exe:
-            return [(r.decode().split('==')[0] if not versions else r.decode()) for r in
-                    subprocess.check_output([python_exe, '-m', 'pip', 'freeze']).split()]
-        else:
-            return [(r.split('==')[0] if not versions else r) for r in
-                    subprocess.getoutput([sys.executable, "-m", "pip", "freeze"]).splitlines()]
-    except subprocess.CalledProcessError as e:
-        raise e  # re-raise the error to handle it outside
-
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=7)
+                print(f"\r{message('Efficiency Nodes:')} {printout}{success(' Installed!')}", flush=True)
+            except Exception as e:
+                print(f"\r{message('Efficiency Nodes:')} {printout}{error(' Failed!')}", flush=True)
+                print(f"{warning(str(e))}")
+                
 def print_general_error_message():
-    print(
-        f"\r{message('Efficiency Nodes:')} An unexpected error occurred during the package installation process. {error('Failed!')}")
+    print(f"{message('Efficiency Nodes:')} An unexpected error occurred during the package installation process. {error('Failed!')}")
     print(warning("Please try manually installing the required packages from the requirements.txt file."))
 
 # Install missing packages
