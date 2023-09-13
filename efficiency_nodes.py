@@ -1518,10 +1518,11 @@ class TSC_KSampler:
 
                 elif X_type != "Nothing" and Y_type != "Nothing":
                     for Y_index, Y in enumerate(Y_value):
-
-                        if Y_type == "XY_Capsule" and X_type == "XY_Capsule":
+                        if Y_type == "XY_Capsule" or X_type == "XY_Capsule":
                             model, clip, refiner_model, refiner_clip = \
                                 clone_or_none(original_model, original_clip, original_refiner_model, original_refiner_clip)
+
+                        if Y_type == "XY_Capsule" and X_type == "XY_Capsule":
                             Y.set_x_capsule(X)
 
                         # Define Y parameters and generate labels
