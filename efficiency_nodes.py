@@ -1043,7 +1043,7 @@ class TSC_KSampler:
             elif X_type == "Refiner":
                 ckpt_dict = []
                 lora_dict = []
-            elif X_type == "LoRA":
+            elif X_type in ("LoRA", "LoRA Stacks"):
                 ckpt_dict = []
                 refn_dict = []
 
@@ -1572,7 +1572,7 @@ class TSC_KSampler:
                     clear_cache_by_exception(xyplot_id, lora_dict=[], refn_dict=[])
                 elif X_type == "Refiner":
                     clear_cache_by_exception(xyplot_id, ckpt_dict=[], lora_dict=[])
-                elif X_type == "LoRA":
+                elif X_type in ("LoRA", "LoRA Stacks"):
                     clear_cache_by_exception(xyplot_id, ckpt_dict=[], refn_dict=[])
 
             # __________________________________________________________________________________________________________
