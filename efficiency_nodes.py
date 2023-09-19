@@ -2513,7 +2513,7 @@ class TSC_XYplot_Steps:
             xy_type = "Steps"
             xy_first = first_step
             xy_last = last_step
-        elif target_parameter == "start at step":
+        elif target_parameter == "start_at_step":
             xy_type = "StartStep"
             xy_first = first_start_step
             xy_last = last_start_step
