@@ -472,10 +472,20 @@ def global_preview_method():
 #-----------------------------------------------------------------------------------------------------------------------
 # Auto install Efficiency Nodes Python package dependencies
 import subprocess
-# Note: Auto installer install packages inside the requirements.txt.
-#       It first trys ComfyUI's python_embedded folder if python.exe exists inside ...\ComfyUI_windows_portable\python_embeded.
-#       If no python.exe is found, it attempts a general global pip install of packages.
-#       On an error, an user is directed to attempt manually installing the packages themselves.
+# Note: This auto-installer attempts to import packages listed in the requirements.txt.
+#       If the import fails, indicating the package isn't installed, the installer proceeds to install the package.
+#       It first checks if python.exe exists inside the ...\ComfyUI_windows_portable\python_embeded directory.
+#       If python.exe is found in that location, it will use this embedded Python version for the installation.
+#       Otherwise, it uses the Python interpreter that's currently executing the script (via sys.executable)
+#       to attempt a general pip install of the packages. If any errors occur during installation, an error message is
+#       printed with the reason for the failure, and the user is directed to manually install the required packages.
+
+def is_package_installed(pkg_name):
+    try:
+        __import__(pkg_name)
+        return True
+    except ImportError:
+        return False
 
 def install_packages(my_dir):
     # Compute path to the target site-packages
@@ -483,71 +493,48 @@ def install_packages(my_dir):
     embedded_python_exe = os.path.abspath(os.path.join(my_dir, '..', '..', '..', 'python_embeded', 'python.exe'))
 
     # If embedded_python_exe exists, target the installations. Otherwise, go untargeted.
-    use_embedded = os.path.exists(embedded_python_exe)
+    use_embedded = os.path.exists(embedded_python_exe) and embedded_python_exe == sys.executable
 
     # Load packages from requirements.txt
     with open(os.path.join(my_dir, 'requirements.txt'), 'r') as f:
         required_packages = [line.strip() for line in f if line.strip()]
 
-    installed_packages = packages(embedded_python_exe if use_embedded else None, versions=False)
     for pkg in required_packages:
-        if pkg not in installed_packages:
-            print(f"\033[32mEfficiency Nodes:\033[0m Installing required package '{pkg}'...", end='', flush=True)
+        if not is_package_installed(pkg):
+            printout = f"Installing required package '{pkg}'..."
+            print(f"{message('Efficiency Nodes:')} {printout}", end='', flush=True)
+
             try:
                 if use_embedded:  # Targeted installation
-                    subprocess.check_call(['pip', 'install', pkg, '--target=' + target_dir, '--no-warn-script-location',
-                                           '--disable-pip-version-check'], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    subprocess.check_call([embedded_python_exe, '-m', 'pip', 'install', pkg, '--target=' + target_dir,
+                                           '--no-warn-script-location', '--disable-pip-version-check'],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=7)
                 else:  # Untargeted installation
-                    subprocess.check_call(['pip', 'install', pkg], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                print(f"\r\033[32mEfficiency Nodes:\033[0m Installing required package '{pkg}'... Installed!", flush=True)
-
-            except subprocess.CalledProcessError as e: # Failed installation
-                base_message = f"\r\033[31mEfficiency Nodes Error:\033[0m Failed to install python package '{pkg}'. "
-                if e.stderr:
-                    error_message = e.stderr.decode()
-                    print(base_message + f"Error message: {error_message}")
-                else:
-                    print(base_message + "\nPlease check your permissions, network connectivity, or try a manual installation.")
-
-def packages(python_exe=None, versions=False):
-    # Get packages of the active or embedded Python environment
-    if python_exe:
-        return [(r.decode().split('==')[0] if not versions else r.decode()) for r in
-                subprocess.check_output([python_exe, '-m', 'pip', 'freeze']).split()]
-    else:
-        return [(r.split('==')[0] if not versions else r) for r in subprocess.getoutput('pip freeze').splitlines()]
+                    subprocess.check_call([sys.executable, "-m", "pip", 'install', pkg],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=7)
+                print(f"\r{message('Efficiency Nodes:')} {printout}{success(' Installed!')}", flush=True)
+            except Exception as e:
+                print(f"\r{message('Efficiency Nodes:')} {printout}{error(' Failed!')}", flush=True)
+                print(f"{warning(str(e))}")
+                
+def print_general_error_message():
+    print(f"{message('Efficiency Nodes:')} An unexpected error occurred during the package installation process. {error('Failed!')}")
+    print(warning("Please try manually installing the required packages from the requirements.txt file."))
 
 # Install missing packages
 install_packages(my_dir)
 
 #-----------------------------------------------------------------------------------------------------------------------
-# Auto install efficiency nodes web extensions '\js\' to 'ComfyUI\web\extensions'
+# Delete efficiency nodes web extensions from 'ComfyUI\web\extensions'.
+# Pull https://github.com/comfyanonymous/ComfyUI/pull/1273 now allows defining web extensions through a dir path in init
 import shutil
 
-# Source and destination directories
-source_dir = os.path.join(my_dir, 'js')
+# Destination directory
 destination_dir = os.path.join(comfy_dir, 'web', 'extensions', 'efficiency-nodes-comfyui')
 
-# Create the destination directory if it doesn't exist
-os.makedirs(destination_dir, exist_ok=True)
-
-# Get a list of all .js files in the source directory
-source_files = [f for f in os.listdir(source_dir) if f.endswith('.js')]
-
-# Clear files in the destination directory that aren't in the source directory
-for file_name in os.listdir(destination_dir):
-    if file_name not in source_files and file_name.endswith('.js'):
-        file_path = os.path.join(destination_dir, file_name)
-        os.unlink(file_path)
-
-# Iterate over all files in the source directory for copying
-for file_name in source_files:
-    # Full paths for source and destination
-    source_path = os.path.join(source_dir, file_name)
-    destination_path = os.path.join(destination_dir, file_name)
-
-    # Directly copy the file (this will overwrite if the file already exists)
-    shutil.copy2(source_path, destination_path)
+# Check if the directory exists and delete it
+if os.path.exists(destination_dir):
+    shutil.rmtree(destination_dir)
 
 #-----------------------------------------------------------------------------------------------------------------------
 # Establish a websocket connection to communicate with "efficiency-nodes.js" under:

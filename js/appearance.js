@@ -63,6 +63,7 @@ let colorKeys = Object.keys(COLOR_THEMES).filter(key => key !== "none");
 shuffleArray(colorKeys);  // Shuffle the color themes initially
 
 function setNodeColors(node, theme) {
+    if (!theme) {return;}
     node.shape = "box";
     if(theme.nodeColor && theme.nodeBgColor) {
         node.color = theme.nodeColor;
@@ -79,9 +80,10 @@ const ext = {
             let colorKey = NODE_COLORS[title];
 
             if (colorKey === "random") {
-                if (colorKeys.length === 0) {
-                    colorKeys = Object.values(COLOR_THEMES).filter(theme => theme.nodeColor && theme.nodeBgColor);
-                    shuffleArray(colorKeys);  // Reshuffle when out of colors
+                // Check for a valid color key before popping
+                if (colorKeys.length === 0 || !COLOR_THEMES[colorKeys[colorKeys.length - 1]]) {
+                    colorKeys = Object.keys(COLOR_THEMES).filter(key => key !== "none");
+                    shuffleArray(colorKeys);
                 }
                 colorKey = colorKeys.pop();
             }
