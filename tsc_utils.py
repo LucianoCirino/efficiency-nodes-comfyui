@@ -250,7 +250,8 @@ def load_vae(vae_name, id, cache=None, cache_overwrite=False):
         vae_path = vae_name
     else:
         vae_path = folder_paths.get_full_path("vae", vae_name)
-    vae = comfy.sd.VAE(ckpt_path=vae_path)
+    sd = comfy.utils.load_torch_file(vae_path)
+    vae = comfy.sd.VAE(sd=sd)
 
     if cache:
         if len([entry for entry in loaded_objects["vae"] if id in entry[-1]]) < cache:
