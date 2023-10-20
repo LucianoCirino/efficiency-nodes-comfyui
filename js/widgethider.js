@@ -1,4 +1,4 @@
-import { app } from "/scripts/app.js";
+import { app } from "../../scripts/app.js";
 
 let origProps = {};
 let initialized = false;
@@ -11,19 +11,43 @@ const doesInputWithNameExist = (node, name) => {
     return node.inputs ? node.inputs.some((input) => input.name === name) : false;
 };
 
-const WIDGET_HEIGHT = 24;
+const HIDDEN_TAG = "tschide";
 // Toggle Widget + change size
 function toggleWidget(node, widget, show = false, suffix = "") {
     if (!widget || doesInputWithNameExist(node, widget.name)) return;
+
+    // Store the original properties of the widget if not already stored
+    if (!origProps[widget.name]) {
+        origProps[widget.name] = { origType: widget.type, origComputeSize: widget.computeSize };
+    }
+
+    const origSize = node.size;
+
+    // Set the widget type and computeSize based on the show flag
+    widget.type = show ? origProps[widget.name].origType : HIDDEN_TAG + suffix;
+    widget.computeSize = show ? origProps[widget.name].origComputeSize : () => [0, -4];
+
+    // Recursively handle linked widgets if they exist
+    widget.linkedWidgets?.forEach(w => toggleWidget(node, w, ":" + widget.name, show));
+
+    // Calculate the new height for the node based on its computeSize method
+    const newHeight = node.computeSize()[1];
+    node.setSize([node.size[0], newHeight]);
+}
+
+const WIDGET_HEIGHT = 24;
+// Use for Multiline Widget Nodes (aka Efficient Loaders)
+function toggleWidget_2(node, widget, show = false, suffix = "") {
+    if (!widget || doesInputWithNameExist(node, widget.name)) return;
     
-    const isCurrentlyVisible = widget.type !== "tschide" + suffix;
+    const isCurrentlyVisible = widget.type !== HIDDEN_TAG + suffix;
     if (isCurrentlyVisible === show) return; // Early exit if widget is already in the desired state
 
     if (!origProps[widget.name]) {
         origProps[widget.name] = { origType: widget.type, origComputeSize: widget.computeSize };
     }
 
-    widget.type = show ? origProps[widget.name].origType : "tschide" + suffix;
+    widget.type = show ? origProps[widget.name].origType : HIDDEN_TAG + suffix;
     widget.computeSize = show ? origProps[widget.name].origComputeSize : () => [0, -4];
 
     if (initialized){
@@ -278,7 +302,18 @@ const nodeWidgetHandlers = {
     },
     "XY Input: Control Net Plot": {
         'plot_type': handleXYInputControlNetPlotPlotType
-    }
+    },
+    "Noise Control Script": {
+        'add_seed_noise': handleNoiseControlScript
+    },
+    "HighRes-Fix Script": {
+        'upscale_type': handleHiResFixScript,
+        'use_same_seed': handleHiResFixScript,
+        'use_controlnet':handleHiResFixScript
+    },
+    "Tiled Upscaler Script": {
+        'use_controlnet':handleTiledUpscalerScript
+    },
 };
 
 // In the main function where widgetLogic is called
@@ -293,24 +328,142 @@ function widgetLogic(node, widget) {
 // Efficient Loader Handlers
 function handleEfficientLoaderLoraName(node, widget) {
     if (widget.value === 'None') {       
-        toggleWidget(node, findWidgetByName(node, 'lora_model_strength'));
-        toggleWidget(node, findWidgetByName(node, 'lora_clip_strength'));
+        toggleWidget_2(node, findWidgetByName(node, 'lora_model_strength'));
+        toggleWidget_2(node, findWidgetByName(node, 'lora_clip_strength'));
     } else {
-        toggleWidget(node, findWidgetByName(node, 'lora_model_strength'), true);
-        toggleWidget(node, findWidgetByName(node, 'lora_clip_strength'), true);
+        toggleWidget_2(node, findWidgetByName(node, 'lora_model_strength'), true);
+        toggleWidget_2(node, findWidgetByName(node, 'lora_clip_strength'), true);
     }
 }
 
 // Eff. Loader SDXL Handlers
 function handleEffLoaderSDXLRefinerCkptName(node, widget) {
     if (widget.value === 'None') {
-        toggleWidget(node, findWidgetByName(node, 'refiner_clip_skip'));
-        toggleWidget(node, findWidgetByName(node, 'positive_ascore'));
-        toggleWidget(node, findWidgetByName(node, 'negative_ascore'));
+        toggleWidget_2(node, findWidgetByName(node, 'refiner_clip_skip'));
+        toggleWidget_2(node, findWidgetByName(node, 'positive_ascore'));
+        toggleWidget_2(node, findWidgetByName(node, 'negative_ascore'));
     } else {
-        toggleWidget(node, findWidgetByName(node, 'refiner_clip_skip'), true);
-        toggleWidget(node, findWidgetByName(node, 'positive_ascore'), true);
-        toggleWidget(node, findWidgetByName(node, 'negative_ascore'), true);
+        toggleWidget_2(node, findWidgetByName(node, 'refiner_clip_skip'), true);
+        toggleWidget_2(node, findWidgetByName(node, 'positive_ascore'), true);
+        toggleWidget_2(node, findWidgetByName(node, 'negative_ascore'), true);
+    }
+}
+
+// Noise Control Script Seed Handler
+function handleNoiseControlScript(node, widget) {
+
+    function ensureSeedControlExists(callback) {
+        if (node.seedControl && node.seedControl.lastSeedButton) {
+            callback();
+        } else {
+            setTimeout(() => ensureSeedControlExists(callback), 0);
+        }
+    }
+
+    ensureSeedControlExists(() => {
+        if (widget.value === false) {
+            toggleWidget(node, findWidgetByName(node, 'seed'));
+            toggleWidget(node, findWidgetByName(node, 'weight'));
+            toggleWidget(node, node.seedControl.lastSeedButton);
+            node.seedControl.lastSeedButton.disabled = true; // Disable the button
+        } else {
+            toggleWidget(node, findWidgetByName(node, 'seed'), true);
+            toggleWidget(node, findWidgetByName(node, 'weight'), true);
+            node.seedControl.lastSeedButton.disabled = false; // Enable the button
+            toggleWidget(node, node.seedControl.lastSeedButton, true);
+        }
+    });
+
+}
+
+/// HighRes-Fix Script Handlers
+function handleHiResFixScript(node, widget) {
+
+    function ensureSeedControlExists(callback) {
+        if (node.seedControl && node.seedControl.lastSeedButton) {
+            callback();
+        } else {
+            setTimeout(() => ensureSeedControlExists(callback), 0);
+        }
+    }
+
+    if (findWidgetByName(node, 'upscale_type').value === "latent") {     
+        toggleWidget(node, findWidgetByName(node, 'pixel_upscaler'));
+
+        toggleWidget(node, findWidgetByName(node, 'hires_ckpt_name'), true);
+        toggleWidget(node, findWidgetByName(node, 'latent_upscaler'), true);
+        toggleWidget(node, findWidgetByName(node, 'use_same_seed'), true);
+        toggleWidget(node, findWidgetByName(node, 'hires_steps'), true);
+        toggleWidget(node, findWidgetByName(node, 'denoise'), true);
+        toggleWidget(node, findWidgetByName(node, 'iterations'), true);
+
+        ensureSeedControlExists(() => {
+            if (findWidgetByName(node, 'use_same_seed').value == true) {
+                toggleWidget(node, findWidgetByName(node, 'seed'));
+                toggleWidget(node, node.seedControl.lastSeedButton);
+                node.seedControl.lastSeedButton.disabled = true; // Disable the button
+            } else {
+                toggleWidget(node, findWidgetByName(node, 'seed'), true);
+                node.seedControl.lastSeedButton.disabled = false; // Enable the button
+                toggleWidget(node, node.seedControl.lastSeedButton, true);
+            }
+        });
+
+        if (findWidgetByName(node, 'use_controlnet').value == '_'){
+            toggleWidget(node, findWidgetByName(node, 'use_controlnet'));
+            toggleWidget(node, findWidgetByName(node, 'control_net_name'));
+            toggleWidget(node, findWidgetByName(node, 'strength'));
+            toggleWidget(node, findWidgetByName(node, 'preprocessor'));
+            toggleWidget(node, findWidgetByName(node, 'preprocessor_imgs'));
+        }
+        else{
+            toggleWidget(node, findWidgetByName(node, 'use_controlnet'), true);
+
+            if (findWidgetByName(node, 'use_controlnet').value == true){
+                toggleWidget(node, findWidgetByName(node, 'control_net_name'), true);
+                toggleWidget(node, findWidgetByName(node, 'strength'), true);
+                toggleWidget(node, findWidgetByName(node, 'preprocessor'), true);
+                toggleWidget(node, findWidgetByName(node, 'preprocessor_imgs'), true);
+            }
+            else{
+                toggleWidget(node, findWidgetByName(node, 'control_net_name'));
+                toggleWidget(node, findWidgetByName(node, 'strength'));
+                toggleWidget(node, findWidgetByName(node, 'preprocessor'));
+                toggleWidget(node, findWidgetByName(node, 'preprocessor_imgs'));
+            }
+        }
+
+    } else if (findWidgetByName(node, 'upscale_type').value === "pixel") {
+        toggleWidget(node, findWidgetByName(node, 'hires_ckpt_name'));
+        toggleWidget(node, findWidgetByName(node, 'latent_upscaler'));
+        toggleWidget(node, findWidgetByName(node, 'use_same_seed'));
+        toggleWidget(node, findWidgetByName(node, 'hires_steps'));
+        toggleWidget(node, findWidgetByName(node, 'denoise'));
+        toggleWidget(node, findWidgetByName(node, 'iterations'));
+        toggleWidget(node, findWidgetByName(node, 'seed'));
+        ensureSeedControlExists(() => {
+            toggleWidget(node, node.seedControl.lastSeedButton);
+            node.seedControl.lastSeedButton.disabled = true; // Disable the button
+        });
+        toggleWidget(node, findWidgetByName(node, 'use_controlnet'));
+        toggleWidget(node, findWidgetByName(node, 'control_net_name'));
+        toggleWidget(node, findWidgetByName(node, 'strength'));
+        toggleWidget(node, findWidgetByName(node, 'preprocessor'));
+        toggleWidget(node, findWidgetByName(node, 'preprocessor_imgs'));
+
+        toggleWidget(node, findWidgetByName(node, 'pixel_upscaler'), true);
+    }
+}
+
+/// Tiled Upscaler Script Handler
+function handleTiledUpscalerScript(node, widget) {
+    if (findWidgetByName(node, 'use_controlnet').value == true){
+        toggleWidget(node, findWidgetByName(node, 'tile_controlnet'), true);
+        toggleWidget(node, findWidgetByName(node, 'strength'), true);
+    }
+    else{
+        toggleWidget(node, findWidgetByName(node, 'tile_controlnet'));
+        toggleWidget(node, findWidgetByName(node, 'strength'));
     }
 }
 
@@ -437,7 +590,7 @@ app.registerExtension({
                 }
             });
         }
-        setTimeout(() => {initialized = true;}, 2000);
+        setTimeout(() => {initialized = true;}, 500);
     }
 });
 
