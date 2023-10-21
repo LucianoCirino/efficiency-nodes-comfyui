@@ -128,8 +128,8 @@ Efficiency Nodes for ComfyUI
 <details>
     <summary><b>SimpleEval Nodes</b></summary>
 <ul>
-    <li>A collection of nodes that allows users to write simple Python expressions for a variety of data types using the <a href="https://github.com/danthedeckie/simpleeval" >simpleeval</a> library.</li>
-    <li>To activate you must have installed the simpleeval library in Python</li>
+    <li>A collection of nodes that allows users to write simple Python expressions for a variety of data types using the <i><a href="https://github.com/danthedeckie/simpleeval" >simpleeval</a></i> library.</li>
+    <li>To activate you must have installed the simpleeval library in your Python workspace.</li>
     <pre>pip install simpleeval</pre>
 </ul>
 <p align="center">
