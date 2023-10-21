@@ -64,7 +64,7 @@ Efficiency Nodes for ComfyUI
     <ul>
         <li>Node that the gives user the ability to upscale KSampler results through variety of different methods.</li>
         <li>Comes out of the box with popular Neural Network Latent Upscalers such as Ttl's <a href="https://github.com/Ttl/ComfyUi_NNLatentUpscale">ComfyUi_NNLatentUpscale</a> and City96's <a href="https://github.com/city96/SD-Latent-Upscaler">SD-Latent-Upscaler</a>.</li>
-        <li>Supports ControlNet guided latent upscaling. <p><i> Note: You must have Fannovel's <a href="https://github.com/Fannovel16/comfyui_controlnet_aux">comfyui_controlnet_aux</a> installed to unlock this feature)</i></p></li>
+        <li>Supports ControlNet guided latent upscaling. <i> (You must have Fannovel's <a href="https://github.com/Fannovel16/comfyui_controlnet_aux">comfyui_controlnet_aux</a> installed to unlock this feature)</i></li>
     </ul>
     <p align="center">
       <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/HighResFix%20-%20Node%20Example.gif" width="1080">
@@ -76,10 +76,10 @@ Efficiency Nodes for ComfyUI
         <summary><b>Noise Control</b></summary>
     <ul>
         <li>This node gives the user the ability to manipulate noise sources in a variety of ways, such as the sampling's RNG source.</li>
-        <li>The <a href="https://github.com/shiimizu/ComfyUI_smZNodes">CFG Denoiser</a> noise hijack setting developed by smZ that allows you to closer mimic Automatic1111 style generations.</li>
+        <li>The <a href="https://github.com/shiimizu/ComfyUI_smZNodes">CFG Denoiser</a> noise hijack was developed by smZ, it allows you to get closer recreating Automatic1111 results.</li>
             <p></p><i>Note: The CFG Denoiser does not work with a variety of conditioning types such as ControlNet & GLIGEN</i></p>
-        <li>Allows you to add noise <a href="https://github.com/chrisgoringe/cg-noise">Seed Variations</a> to your generations.</li>
-        <li>For trying to replicate Automatic1111 images, this node will help you achieve it. Encode your prompt using "length+mean" token normalization with "A1111" weight interpretation, set the Noise Control Script node's rng_source to "gpu", and turn the CFG Denoiser to true.</li>
+        <li>This node also allows you to add noise <a href="https://github.com/chrisgoringe/cg-noise">Seed Variations</a> to your generations.</li>
+        <li>For trying to replicate Automatic1111 images, this node will help you achieve it. Encode your prompt using "length+mean" <code>token_normalization</code> with "A1111" <code>weight_interpretation</code>, set the Noise Control Script node's <code>rng_source</code> to "gpu", and turn the <code>cfg_denoiser</code> to true.</li>
     </ul>
     <p align="center">
       <img src="https://github.com/LucianoCirino/efficiency-nodes-media/blob/main/images/nodes/NODE%20-%20Noise%20Control%20Script.png" width="320">
