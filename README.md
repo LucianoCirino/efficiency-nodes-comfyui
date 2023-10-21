@@ -149,7 +149,7 @@ Efficiency Nodes for ComfyUI
 2. SDXL Refining & **Noise Control Script**<br>
    [<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/SDXL%20Refining%20%26%20Noise%20Control%20Script.png" width="800">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/SDXL%20Refining%20%26%20Noise%20Control%20Script.png)<br>
 
-3. **XY Plot**: LoRA model_strength vs clip_strength<br>
+3. **XY Plot**: LoRA <code>model_strength</code> vs <code>clip_strength</code><br>
    [<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/XYPlot%20-%20LoRA%20Model%20vs%20Clip%20Strengths.png" width="800">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/XYPlot%20-%20LoRA%20Model%20vs%20Clip%20Strengths.png)<br>
 
 4. Stacking Scripts: **XY Plot** + **Noise Control** + **HiRes-Fix**<br>
@@ -160,7 +160,7 @@ Efficiency Nodes for ComfyUI
 
 
 ### Dependencies
-The python library <i>simpleeval</i> is required to be installed if you wish to use the **Simpleeval Nodes**.
+The python library <i><a href="https://github.com/danthedeckie/simpleeval" >simpleeval</a></i> is required to be installed if you wish to use the **Simpleeval Nodes**.
 <pre>pip install simpleeval</pre>
 
 ## **Install:**
