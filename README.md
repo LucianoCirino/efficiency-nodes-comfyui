@@ -155,7 +155,7 @@ Efficiency Nodes for ComfyUI
 4. Stacking Scripts: **XY Plot** + **Noise Control** + **HiRes-Fix**<br>
    [<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/XYPlot%20-%20Seeds%20vs%20Checkpoints%20%26%20Stacked%20Scripts.png" width="800">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/XYPlot%20-%20Seeds%20vs%20Checkpoints%20%26%20Stacked%20Scripts.png)<br>
 
-5. Stacking Scripts: **AnimateDiff** + **HiRes-Fix**<br>
+5. Stacking Scripts: **AnimateDiff** + **HiRes-Fix**(with ControlNet)<br>
    [<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/AnimateDiff%20%26%20HiResFix%20Scripts.gif" width="800">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/AnimateDiff%20%26%20HiResFix%20Scripts.gif)<br>
 
 
