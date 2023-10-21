@@ -160,7 +160,8 @@ Efficiency Nodes for ComfyUI
 
 
 ### Dependencies
-Simpleeval library is required to use the simpleeval nodes.
+The python library <i>simpleeval</i> is required to be installed if you wish to use the **Simpleeval Nodes**.
+<pre>pip install simpleeval</pre>
 
 ## **Install:**
 To install, drop the "_**efficiency-nodes-comfyui**_" folder into the "_**...\ComfyUI\ComfyUI\custom_nodes**_" directory and restart UI.
