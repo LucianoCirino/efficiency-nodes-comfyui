@@ -142,23 +142,24 @@ Efficiency Nodes for ComfyUI
 
 ## **Workflow Examples:**
   
-- HiResFix using the **Efficient Loader**, **Ksampler (Efficient)**, and **HiResFix Script** nodes
+- HiResFixing with the **HiRes-Fix Script** node
 
-[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/HiRes Fix (overview).png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/HiRes%20Fix.png)
+[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/HiResFix%20Script.png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/HiResFix%20Script.png)
 
-- SDXL Refining using the **Eff. SDXL Loader**, and **Ksampler SDXL (Eff.)**
+- SDXL Refining using the **Eff. SDXL Loader**, & **Ksampler SDXL (Eff.)**
 
-[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/SDXL Base+Refine (Overview).png" width="640">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/SDXL%20Base%2BRefine.png)
+[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/SDXL%20Refining%20%26%20Noise%20Control%20Script.png" width="640">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/SDXL%20Refining%20%26%20Noise%20Control%20Script.png)
 
-- 2D Plotting using the **XY Plot** & **Ksampler (Efficient)** nodes 
+- Comparing LoRA Model & Clip Strenghts via the **XY Plot** node.
 
-[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/X-Seeds Y-Checkpoints (overview).png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/X-Seeds%20Y-Checkpoints.png)
+[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/XYPlot%20-%20LoRA%20Model%20vs%20Clip%20Strengths.png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/XYPlot%20-%20LoRA%20Model%20vs%20Clip%20Strengths.png)
 
-[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/LoRA Plot X-ModelStr Y-ClipStr (Overview).png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/XYplot/LoRA%20Plot%20X-ModelStr%20Y-ClipStr.png)
+- Stacking Scripts: **XY Plot** + **Noise Control** + **HiRes-Fix**
 
-- Photobashing using the **Image Overlay** node
+[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/XYPlot%20-%20Seeds%20vs%20Checkpoints%20%26%20Stacked%20Scripts.png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/XYPlot%20-%20Seeds%20vs%20Checkpoints%20%26%20Stacked%20Scripts.png)
 
-[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/Image Overlay (overview).png" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/main/workflows/Image%20Overlay.png)
+- Stacking Scripts: **AnimateDiff** + **HiRes-Fix** 
+[<img src="https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/AnimateDiff%20%26%20HiResFix%20Scripts.gif" width="720">](https://github.com/LucianoCirino/efficiency-nodes-comfyui/blob/v2.0/workflows/AnimateDiff%20%26%20HiResFix%20Scripts.gif)
 
 ### Dependencies
 Dependencies are automatically installed during ComfyUI boot up.
