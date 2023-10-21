@@ -516,67 +516,6 @@ def global_preview_method():
     return args.preview_method
 
 #-----------------------------------------------------------------------------------------------------------------------
-# Auto install Efficiency Nodes Python package dependencies
-import subprocess
-# Note: This auto-installer installs packages listed in the requirements.txt.
-#       It first checks if python.exe exists inside the ...\ComfyUI_windows_portable\python_embeded directory.
-#       If python.exe is found in that location, it will use this embedded Python version for the installation.
-#       Otherwise, it uses the Python interpreter that's currently executing the script (via sys.executable) to attempt a general pip install of the packages.
-#       If any errors occur during installation, the user is directed to manually install the required packages.
-
-def install_packages(my_dir):
-    # Compute path to the target site-packages
-    target_dir = os.path.abspath(os.path.join(my_dir, '..', '..', '..', 'python_embeded', 'Lib', 'site-packages'))
-    embedded_python_exe = os.path.abspath(os.path.join(my_dir, '..', '..', '..', 'python_embeded', 'python.exe'))
-
-    # If embedded_python_exe exists, target the installations. Otherwise, go untargeted.
-    use_embedded = os.path.exists(embedded_python_exe) and embedded_python_exe == sys.executable
-
-    # Load packages from requirements.txt
-    with open(os.path.join(my_dir, 'requirements.txt'), 'r') as f:
-        required_packages = [line.strip() for line in f if line.strip()]
-
-    try:
-        installed_packages = packages(embedded_python_exe if use_embedded else None, versions=False)
-
-        for pkg in required_packages:
-            if pkg not in installed_packages:
-                printout = f"Installing required package '{pkg}'..."
-                print(f"{message('Efficiency Nodes:')} {printout}", end='', flush=True)
-
-                if use_embedded:  # Targeted installation
-                    subprocess.check_call([embedded_python_exe, '-m', 'pip', 'install', pkg, '--target=' + target_dir,
-                                           '--no-warn-script-location', '--disable-pip-version-check'],
-                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                else:  # Untargeted installation
-                    subprocess.check_call([sys.executable, "-m", "pip", 'install', pkg],
-                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-
-                print(f"\r{message('Efficiency Nodes:')} {printout}{success('Installed!')}", flush=True)
-
-    except Exception as e:  # This catches all exceptions derived from the base Exception class
-        print_general_error_message()
-
-def packages(python_exe=None, versions=False):
-    try:
-        if python_exe:
-            return [(r.decode().split('==')[0] if not versions else r.decode()) for r in
-                    subprocess.check_output([python_exe, '-m', 'pip', 'freeze']).split()]
-        else:
-            return [(r.split('==')[0] if not versions else r) for r in
-                    subprocess.getoutput([sys.executable, "-m", "pip", "freeze"]).splitlines()]
-    except subprocess.CalledProcessError as e:
-        raise e  # re-raise the error to handle it outside
-
-def print_general_error_message():
-    print(
-        f"\r{message('Efficiency Nodes:')} An unexpected error occurred during the package installation process. {error('Failed!')}")
-    print(warning("Please try manually installing the required packages from the requirements.txt file."))
-
-# Install missing packages
-install_packages(my_dir)
-
-#-----------------------------------------------------------------------------------------------------------------------
 # Delete efficiency nodes web extensions from 'ComfyUI\web\extensions'.
 # Pull https://github.com/comfyanonymous/ComfyUI/pull/1273 now allows defining web extensions through a dir path in init
 import shutil
