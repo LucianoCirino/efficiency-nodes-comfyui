@@ -1,5 +1,5 @@
 # Efficiency Nodes - A collection of my ComfyUI custom nodes to help streamline workflows and reduce total node count.
-# by Luciano Cirino (Discord: TSC#9184) - April 2023 - August 2023
+# by Luciano Cirino (Discord: TSC#9184) - April 2023 - October 2023
 # https://github.com/LucianoCirino/efficiency-nodes-comfyui
 
 from torch import Tensor
@@ -29,8 +29,11 @@ font_path = os.path.join(my_dir, 'arial.ttf')
 # Append comfy_dir to sys.path & import files
 sys.path.append(comfy_dir)
 from nodes import LatentUpscaleBy, KSampler, KSamplerAdvanced, VAEDecode, VAEDecodeTiled, VAEEncode, VAEEncodeTiled, \
-    ImageScaleBy, CLIPSetLastLayer, CLIPTextEncode, ControlNetLoader, ControlNetApply, ControlNetApplyAdvanced
+    ImageScaleBy, CLIPSetLastLayer, CLIPTextEncode, ControlNetLoader, ControlNetApply, ControlNetApplyAdvanced, \
+    PreviewImage, MAX_RESOLUTION
+from comfy_extras.nodes_upscale_model import UpscaleModelLoader, ImageUpscaleWithModel
 from comfy_extras.nodes_clip_sdxl import CLIPTextEncodeSDXL, CLIPTextEncodeSDXLRefiner
+import comfy.sample
 import comfy.samplers
 import comfy.sd
 import comfy.utils
@@ -40,46 +43,46 @@ sys.path.remove(comfy_dir)
 # Append my_dir to sys.path & import files
 sys.path.append(my_dir)
 from tsc_utils import *
+from .py import smZ_cfg_denoiser
+from .py import smZ_rng_source
+from .py import cg_mixed_seed_noise
+from .py import city96_latent_upscaler
+from .py import ttl_nn_latent_upscaler
+from .py import bnk_tiled_samplers
+from .py import bnk_adv_encode
 sys.path.remove(my_dir)
 
 # Append custom_nodes_dir to sys.path
 sys.path.append(custom_nodes_dir)
 
 # GLOBALS
-MAX_RESOLUTION=8192
 REFINER_CFG_OFFSET = 0 #Refiner CFG Offset
 
 ########################################################################################################################
 # Common function for encoding prompts
-def encode_prompts(positive_prompt, negative_prompt, clip, clip_skip, refiner_clip, refiner_clip_skip, ascore, is_sdxl,
-                   empty_latent_width, empty_latent_height, return_type="both"):
+def encode_prompts(positive_prompt, negative_prompt, token_normalization, weight_interpretation, clip, clip_skip,
+                   refiner_clip, refiner_clip_skip, ascore, is_sdxl, empty_latent_width, empty_latent_height,
+                   return_type="both"):
 
     positive_encoded = negative_encoded = refiner_positive_encoded = refiner_negative_encoded = None
 
     # Process base encodings if needed
     if return_type in ["base", "both"]:
-        # Base clip skip
         clip = CLIPSetLastLayer().set_last_layer(clip, clip_skip)[0]
-        if not is_sdxl:
-            positive_encoded = CLIPTextEncode().encode(clip, positive_prompt)[0]
-            negative_encoded = CLIPTextEncode().encode(clip, negative_prompt)[0]
-        else:
-            # Encode prompt for base
-            positive_encoded = CLIPTextEncodeSDXL().encode(clip, empty_latent_width, empty_latent_height, 0, 0,
-                                                           empty_latent_width, empty_latent_height, positive_prompt,
-                                                           positive_prompt)[0]
-            negative_encoded = CLIPTextEncodeSDXL().encode(clip, empty_latent_width, empty_latent_height, 0, 0,
-                                                           empty_latent_width, empty_latent_height, negative_prompt,
-                                                           negative_prompt)[0]
+
+        positive_encoded = bnk_adv_encode.AdvancedCLIPTextEncode().encode(clip, positive_prompt, token_normalization, weight_interpretation)[0]
+        negative_encoded = bnk_adv_encode.AdvancedCLIPTextEncode().encode(clip, negative_prompt, token_normalization, weight_interpretation)[0]
+
     # Process refiner encodings if needed
     if return_type in ["refiner", "both"] and is_sdxl and refiner_clip and refiner_clip_skip and ascore:
-        # Refiner clip skip
         refiner_clip = CLIPSetLastLayer().set_last_layer(refiner_clip, refiner_clip_skip)[0]
-        # Encode prompt for refiner
-        refiner_positive_encoded = CLIPTextEncodeSDXLRefiner().encode(refiner_clip, ascore[0], empty_latent_width,
-                                                                      empty_latent_height, positive_prompt)[0]
-        refiner_negative_encoded = CLIPTextEncodeSDXLRefiner().encode(refiner_clip, ascore[1], empty_latent_width,
-                                                                      empty_latent_height, negative_prompt)[0]
+
+        refiner_positive_encoded = bnk_adv_encode.AdvancedCLIPTextEncode().encode(refiner_clip, positive_prompt, token_normalization, weight_interpretation)[0]
+        refiner_positive_encoded = bnk_adv_encode.AddCLIPSDXLRParams().encode(refiner_positive_encoded, empty_latent_width, empty_latent_height, ascore[0])[0]
+
+        refiner_negative_encoded = bnk_adv_encode.AdvancedCLIPTextEncode().encode(refiner_clip, negative_prompt, token_normalization, weight_interpretation)[0]
+        refiner_negative_encoded = bnk_adv_encode.AddCLIPSDXLRParams().encode(refiner_negative_encoded, empty_latent_width, empty_latent_height, ascore[1])[0]
+
     # Return results based on return_type
     if return_type == "base":
         return positive_encoded, negative_encoded, clip
@@ -100,11 +103,13 @@ class TSC_EfficientLoader:
                               "lora_name": (["None"] + folder_paths.get_filename_list("loras"),),
                               "lora_model_strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
                               "lora_clip_strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                              "positive": ("STRING", {"default": "Positive","multiline": True}),
-                              "negative": ("STRING", {"default": "Negative", "multiline": True}),
+                              "positive": ("STRING", {"default": "CLIP_POSITIVE","multiline": True}),
+                              "negative": ("STRING", {"default": "CLIP_NEGATIVE", "multiline": True}),
+                              "token_normalization": (["none", "mean", "length", "length+mean"],),
+                              "weight_interpretation": (["comfy", "A1111", "compel", "comfy++", "down_weight"],),
                               "empty_latent_width": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 64}),
                               "empty_latent_height": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 64}),
-                              "batch_size": ("INT", {"default": 1, "min": 1, "max": 64})},
+                              "batch_size": ("INT", {"default": 1, "min": 1, "max": 262144})},
                 "optional": {"lora_stack": ("LORA_STACK", ),
                              "cnet_stack": ("CONTROL_NET_STACK",)},
                 "hidden": { "prompt": "PROMPT",
@@ -117,9 +122,9 @@ class TSC_EfficientLoader:
     CATEGORY = "Efficiency Nodes/Loaders"
 
     def efficientloader(self, ckpt_name, vae_name, clip_skip, lora_name, lora_model_strength, lora_clip_strength,
-                        positive, negative, empty_latent_width, empty_latent_height, batch_size, lora_stack=None,
-                        cnet_stack=None, refiner_name="None", ascore=None, prompt=None, my_unique_id=None,
-                        loader_type="regular"):
+                        positive, negative, token_normalization, weight_interpretation, empty_latent_width,
+                        empty_latent_height, batch_size, lora_stack=None, cnet_stack=None, refiner_name="None",
+                        ascore=None, prompt=None, my_unique_id=None, loader_type="regular"):
 
         # Clean globally stored objects
         globals_cleanup(prompt)
@@ -164,8 +169,9 @@ class TSC_EfficientLoader:
 
         # Encode prompt based on loader_type
         positive_encoded, negative_encoded, clip, refiner_positive_encoded, refiner_negative_encoded, refiner_clip = \
-            encode_prompts(positive, negative, clip, clip_skip, refiner_clip, refiner_clip_skip, ascore,
-                           loader_type == "sdxl", empty_latent_width, empty_latent_height)
+            encode_prompts(positive, negative, token_normalization, weight_interpretation, clip, clip_skip,
+                           refiner_clip, refiner_clip_skip, ascore, loader_type == "sdxl",
+                           empty_latent_width, empty_latent_height)
 
         # Apply ControlNet Stack if given
         if cnet_stack:
@@ -178,7 +184,8 @@ class TSC_EfficientLoader:
 
         # Data for XY Plot
         dependencies = (vae_name, ckpt_name, clip, clip_skip, refiner_name, refiner_clip, refiner_clip_skip,
-                        positive, negative, ascore, empty_latent_width, empty_latent_height, lora_params, cnet_stack)
+                        positive, negative, token_normalization, weight_interpretation, ascore,
+                        empty_latent_width, empty_latent_height, lora_params, cnet_stack)
 
         ### Debugging
         ###print_loaded_objects_entries()
@@ -197,14 +204,16 @@ class TSC_EfficientLoaderSDXL(TSC_EfficientLoader):
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": { "base_ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
-                              "base_clip_skip": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
+                              "base_clip_skip": ("INT", {"default": -2, "min": -24, "max": -1, "step": 1}),
                               "refiner_ckpt_name": (["None"] + folder_paths.get_filename_list("checkpoints"),),
-                              "refiner_clip_skip": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
+                              "refiner_clip_skip": ("INT", {"default": -2, "min": -24, "max": -1, "step": 1}),
                               "positive_ascore": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
                               "negative_ascore": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
                               "vae_name": (["Baked VAE"] + folder_paths.get_filename_list("vae"),),
-                              "positive": ("STRING", {"default": "Positive","multiline": True}),
-                              "negative": ("STRING", {"default": "Negative", "multiline": True}),
+                              "positive": ("STRING", {"default": "CLIP_POSITIVE", "multiline": True}),
+                              "negative": ("STRING", {"default": "CLIP_NEGATIVE", "multiline": True}),
+                              "token_normalization": (["none", "mean", "length", "length+mean"],),
+                              "weight_interpretation": (["comfy", "A1111", "compel", "comfy++", "down_weight"],),
                               "empty_latent_width": ("INT", {"default": 1024, "min": 64, "max": MAX_RESOLUTION, "step": 128}),
                               "empty_latent_height": ("INT", {"default": 1024, "min": 64, "max": MAX_RESOLUTION, "step": 128}),
                               "batch_size": ("INT", {"default": 1, "min": 1, "max": 64})},
@@ -218,15 +227,16 @@ class TSC_EfficientLoaderSDXL(TSC_EfficientLoader):
     CATEGORY = "Efficiency Nodes/Loaders"
 
     def efficientloaderSDXL(self, base_ckpt_name, base_clip_skip, refiner_ckpt_name, refiner_clip_skip, positive_ascore,
-                            negative_ascore, vae_name, positive, negative, empty_latent_width, empty_latent_height,
-                            batch_size, lora_stack=None, cnet_stack=None, prompt=None, my_unique_id=None):
+                            negative_ascore, vae_name, positive, negative, token_normalization, weight_interpretation,
+                            empty_latent_width, empty_latent_height, batch_size, lora_stack=None, cnet_stack=None,
+                            prompt=None, my_unique_id=None):
         clip_skip = (base_clip_skip, refiner_clip_skip)
         lora_name = "None"
         lora_model_strength = lora_clip_strength = 0
         return super().efficientloader(base_ckpt_name, vae_name, clip_skip, lora_name, lora_model_strength, lora_clip_strength,
-                        positive, negative, empty_latent_width, empty_latent_height, batch_size, lora_stack=lora_stack,
-                        cnet_stack=cnet_stack, refiner_name=refiner_ckpt_name, ascore=(positive_ascore, negative_ascore),
-                        prompt=prompt, my_unique_id=my_unique_id, loader_type="sdxl")
+                        positive, negative, token_normalization, weight_interpretation, empty_latent_width, empty_latent_height,
+                        batch_size, lora_stack=lora_stack, cnet_stack=cnet_stack, refiner_name=refiner_ckpt_name,
+                        ascore=(positive_ascore, negative_ascore), prompt=prompt, my_unique_id=my_unique_id, loader_type="sdxl")
 
 #=======================================================================================================================
 # TSC Unpack SDXL Tuple
@@ -377,21 +387,17 @@ class TSC_Apply_ControlNet_Stack:
 
         return (positive, negative, )
 
+
 ########################################################################################################################
 # TSC KSampler (Efficient)
 class TSC_KSampler:
     
     empty_image = pil2tensor(Image.new('RGBA', (1, 1), (0, 0, 0, 0)))
 
-    def __init__(self):
-        self.output_dir = os.path.join(comfy_dir, 'temp')
-        self.type = "temp"
-
     @classmethod
     def INPUT_TYPES(cls):
         return {"required":
-                    {"sampler_state": (["Sample", "Script", "Hold"], ),
-                     "model": ("MODEL",),
+                    {"model": ("MODEL",),
                      "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                      "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                      "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
@@ -401,8 +407,8 @@ class TSC_KSampler:
                      "negative": ("CONDITIONING",),
                      "latent_image": ("LATENT",),
                      "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                     "preview_method": (["auto", "latent2rgb", "taesd", "none"],),
-                     "vae_decode": (["true", "true (tiled)", "false", "output only", "output only (tiled)"],),
+                     "preview_method": (["auto", "latent2rgb", "taesd", "vae_decoded_only", "none"],),
+                     "vae_decode": (["true", "true (tiled)", "false"],),
                      },
                 "optional": { "optional_vae": ("VAE",),
                               "script": ("SCRIPT",),},
@@ -415,8 +421,8 @@ class TSC_KSampler:
     FUNCTION = "sample"
     CATEGORY = "Efficiency Nodes/Sampling"
 
-    def sample(self, sampler_state, model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-               latent_image, preview_method, vae_decode, denoise=1.0, prompt=None, extra_pnginfo=None, my_unique_id=None,
+    def sample(self, model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
+               preview_method, vae_decode, denoise=1.0, prompt=None, extra_pnginfo=None, my_unique_id=None,
                optional_vae=(None,), script=None, add_noise=None, start_at_step=None, end_at_step=None,
                return_with_leftover_noise=None, sampler_type="regular"):
 
@@ -440,93 +446,6 @@ class TSC_KSampler:
         def keys_exist_in_script(*keys):
             return any(key in script for key in keys) if script else False
 
-        # If no valid script input connected, error out
-        if not keys_exist_in_script("xyplot", "hiresfix", "tile") and sampler_state == "Script":
-            print(f"{error('KSampler(Efficient) Error:')} No valid script input detected")
-            if sampler_type == "sdxl":
-                result = (sdxl_tuple, latent_image, vae, TSC_KSampler.empty_image,)
-            else:
-                result = (model, positive, negative, latent_image, vae, TSC_KSampler.empty_image,)
-            return {"ui": {"images": list()}, "result": result}
-
-        #---------------------------------------------------------------------------------------------------------------
-        def map_filename(filename):
-            prefix_len = len(os.path.basename(filename_prefix))
-            prefix = filename[:prefix_len + 1]
-            try:
-                digits = int(filename[prefix_len + 1:].split('_')[0])
-            except:
-                digits = 0
-            return (digits, prefix)
-
-        def compute_vars(images,input):
-            input = input.replace("%width%", str(images[0].shape[1]))
-            input = input.replace("%height%", str(images[0].shape[0]))
-            return input
-
-        def preview_image(images, filename_prefix):
-
-            if images == list():
-                return list()
-
-            filename_prefix = compute_vars(images,filename_prefix)
-
-            subfolder = os.path.dirname(os.path.normpath(filename_prefix))
-            filename = os.path.basename(os.path.normpath(filename_prefix))
-
-            full_output_folder = os.path.join(self.output_dir, subfolder)
-
-            try:
-                counter = max(filter(lambda a: a[1][:-1] == filename and a[1][-1] == "_",
-                                     map(map_filename, os.listdir(full_output_folder))))[0] + 1
-            except ValueError:
-                counter = 1
-            except FileNotFoundError:
-                os.makedirs(full_output_folder, exist_ok=True)
-                counter = 1
-
-            if not os.path.exists(self.output_dir):
-                os.makedirs(self.output_dir)
-
-            results = list()
-            for image in images:
-                i = 255. * image.cpu().numpy()
-                img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-                metadata = PngInfo()
-                if prompt is not None:
-                    metadata.add_text("prompt", json.dumps(prompt))
-                if extra_pnginfo is not None:
-                    for x in extra_pnginfo:
-                        metadata.add_text(x, json.dumps(extra_pnginfo[x]))
-                file = f"{filename}_{counter:05}_.png"
-                img.save(os.path.join(full_output_folder, file), pnginfo=metadata, compress_level=4)
-                results.append({
-                    "filename": file,
-                    "subfolder": subfolder,
-                    "type": self.type
-                });
-                counter += 1
-            return results
-
-        #---------------------------------------------------------------------------------------------------------------
-        def get_value_by_id(key: str, my_unique_id):
-            global last_helds
-            for value, id_ in last_helds[key]:
-                if id_ == my_unique_id:
-                    return value
-            return None
-
-        def update_value_by_id(key: str, my_unique_id, new_value):
-            global last_helds
-
-            for i, (value, id_) in enumerate(last_helds[key]):
-                if id_ == my_unique_id:
-                    last_helds[key][i] = (new_value, id_)
-                    return True
-
-            last_helds[key].append((new_value, my_unique_id))
-            return True
-
         #---------------------------------------------------------------------------------------------------------------
         def vae_decode_latent(vae, samples, vae_decode):
             return VAEDecodeTiled().decode(vae,samples,512)[0] if "tiled" in vae_decode else VAEDecode().decode(vae,samples)[0]
@@ -535,201 +454,271 @@ class TSC_KSampler:
             return VAEEncodeTiled().encode(vae,pixels,512)[0] if "tiled" in vae_decode else VAEEncode().encode(vae,pixels)[0]
 
         # ---------------------------------------------------------------------------------------------------------------
-        def sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
+        def process_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
                                 denoise, sampler_type, add_noise, start_at_step, end_at_step, return_with_leftover_noise,
-                                refiner_model, refiner_positive, refiner_negative, vae, vae_decode, sampler_state):
+                                refiner_model, refiner_positive, refiner_negative, vae, vae_decode, preview_method):
 
-            # Sample the latent_image(s) using the Comfy KSampler nodes
-            if sampler_type == "regular":
-                samples = KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-                                            latent_image, denoise=denoise)[0]
+            # Store originals
+            previous_preview_method = global_preview_method()
+            original_prepare_noise = comfy.sample.prepare_noise
+            original_KSampler = comfy.samplers.KSampler
+            original_model_str = str(model)
 
-            elif sampler_type == "advanced":
-                samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler,
-                                                    positive, negative, latent_image, start_at_step, end_at_step,
-                                                    return_with_leftover_noise, denoise=1.0)[0]
+            # Initialize output variables
+            samples = images = gifs = preview = cnet_imgs = None
 
-            elif sampler_type == "sdxl":
-                # Disable refiner if refine_at_step is -1
-                if end_at_step == -1:
-                    end_at_step = steps
+            try:
+                # Change the global preview method (temporarily)
+                set_preview_method(preview_method)
 
-                # Perform base model sampling
-                add_noise = return_with_leftover_noise = True
-                samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler,
-                                                    positive, negative, latent_image, start_at_step, end_at_step,
-                                                    return_with_leftover_noise, denoise=1.0)[0]
+                # ------------------------------------------------------------------------------------------------------
+                # Check if "noise" exists in the script before main sampling has taken place
+                if keys_exist_in_script("noise"):
+                    rng_source, cfg_denoiser, add_seed_noise, m_seed, m_weight = script["noise"]
+                    smZ_rng_source.rng_rand_source(rng_source) # this function monkey patches comfy.sample.prepare_noise
+                    if cfg_denoiser:
+                        comfy.samplers.KSampler = smZ_cfg_denoiser.SDKSampler
+                    if add_seed_noise:
+                        comfy.sample.prepare_noise = cg_mixed_seed_noise.get_mixed_noise_function(comfy.sample.prepare_noise, m_seed, m_weight)
+                    else:
+                        m_seed = m_weight = None
+                else:
+                    rng_source = cfg_denoiser = add_seed_noise = m_seed = m_weight = None
 
-                # Perform refiner model sampling
-                if refiner_model and end_at_step < steps:
-                    add_noise = return_with_leftover_noise = False
-                    samples = KSamplerAdvanced().sample(refiner_model, add_noise, seed, steps, cfg + REFINER_CFG_OFFSET,
-                                                        sampler_name, scheduler, refiner_positive, refiner_negative,
-                                                        samples, end_at_step, steps,
+                # ------------------------------------------------------------------------------------------------------
+                # Check if "anim" exists in the script before main sampling has taken place
+                if keys_exist_in_script("anim"):
+                    if preview_method != "none":
+                        set_preview_method("none")  # disable preview method
+                        print(f"{warning('KSampler(Efficient) Warning:')} Live preview disabled for animatediff generations.")
+                    motion_model, beta_schedule, context_options, frame_rate, loop_count, format, pingpong, save_image = script["anim"]
+                    model = AnimateDiffLoaderWithContext().load_mm_and_inject_params(model, motion_model, beta_schedule, context_options)[0]
+
+                # ------------------------------------------------------------------------------------------------------
+                # Store run parameters as strings. Load previous stored samples if all parameters match.
+                latent_image_hash = tensor_to_hash(latent_image["samples"])
+                positive_hash = tensor_to_hash(positive[0][0])
+                negative_hash = tensor_to_hash(negative[0][0])
+                refiner_positive_hash = tensor_to_hash(refiner_positive[0][0]) if refiner_positive is not None else None
+                refiner_negative_hash = tensor_to_hash(refiner_negative[0][0]) if refiner_negative is not None else None
+
+                # Include motion_model, beta_schedule, and context_options as unique identifiers if they exist.
+                model_identifier = [original_model_str, motion_model, beta_schedule, context_options] if keys_exist_in_script("anim")\
+                                    else [original_model_str]
+
+                parameters = [model_identifier] + [seed, steps, cfg, sampler_name, scheduler, positive_hash, negative_hash,
+                                                  latent_image_hash, denoise, sampler_type, add_noise, start_at_step,
+                                                  end_at_step, return_with_leftover_noise, refiner_model, refiner_positive_hash,
+                                                  refiner_negative_hash, rng_source, cfg_denoiser, add_seed_noise, m_seed, m_weight]
+
+                # Convert all elements in parameters to strings, except for the hash variable checks
+                parameters = [str(item) if not isinstance(item, type(latent_image_hash)) else item for item in parameters]
+
+                # Load previous latent if all parameters match, else returns 'None'
+                samples = load_ksampler_results("latent", my_unique_id, parameters)
+
+                if samples is None: # clear stored images
+                    store_ksampler_results("image", my_unique_id, None)
+                    store_ksampler_results("cnet_img", my_unique_id, None)
+
+                if samples is not None: # do not re-sample
+                    images = load_ksampler_results("image", my_unique_id)
+                    cnet_imgs = True # "True" will denote that it can be loaded provided the preprocessor matches
+
+                # Sample the latent_image(s) using the Comfy KSampler nodes
+                elif sampler_type == "regular":
+                    samples = KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
+                                                        latent_image, denoise=denoise)[0] if denoise>0 else latent_image
+
+                elif sampler_type == "advanced":
+                    samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler,
+                                                        positive, negative, latent_image, start_at_step, end_at_step,
                                                         return_with_leftover_noise, denoise=1.0)[0]
 
-            if sampler_state == "Script":
+                elif sampler_type == "sdxl":
+                    # Disable refiner if refine_at_step is -1
+                    if end_at_step == -1:
+                        end_at_step = steps
 
+                    # Perform base model sampling
+                    add_noise = return_with_leftover_noise = True
+                    samples = KSamplerAdvanced().sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler,
+                                                        positive, negative, latent_image, start_at_step, end_at_step,
+                                                        return_with_leftover_noise, denoise=1.0)[0]
+
+                    # Perform refiner model sampling
+                    if refiner_model and end_at_step < steps:
+                        add_noise = return_with_leftover_noise = False
+                        samples = KSamplerAdvanced().sample(refiner_model, add_noise, seed, steps, cfg + REFINER_CFG_OFFSET,
+                                                            sampler_name, scheduler, refiner_positive, refiner_negative,
+                                                            samples, end_at_step, steps,
+                                                            return_with_leftover_noise, denoise=1.0)[0]
+
+                # Cache the first pass samples in the 'last_helds' dictionary "latent" if not xyplot
+                if not any(keys_exist_in_script(key) for key in ["xyplot"]):
+                    store_ksampler_results("latent", my_unique_id, samples, parameters)
+
+                # ------------------------------------------------------------------------------------------------------
                 # Check if "hiresfix" exists in the script after main sampling has taken place
                 if keys_exist_in_script("hiresfix"):
                     # Unpack the tuple from the script's "hiresfix" key
-                    latent_upscale_method, upscale_by, hires_steps, hires_denoise, iterations, upscale_function = script["hiresfix"]
-                    # Iterate for the given number of iterations
-                    for _ in range(iterations):
-                        upscaled_latent_image = upscale_function().upscale(samples, latent_upscale_method, upscale_by)[0]
-                        samples = KSampler().sample(model, seed, hires_steps, cfg, sampler_name, scheduler,
-                                                        positive, negative, upscaled_latent_image, denoise=hires_denoise)[0]
+                    upscale_type, latent_upscaler, upscale_by, use_same_seed, hires_seed, hires_steps, hires_denoise,\
+                        iterations, hires_control_net, hires_cnet_strength, preprocessor, preprocessor_imgs, \
+                        latent_upscale_function, latent_upscale_model, pixel_upscale_model = script["hiresfix"]
 
+                    # Define hires_seed
+                    hires_seed = seed if use_same_seed else hires_seed
+
+                    # Define latent_upscale_model
+                    if latent_upscale_model is None:
+                        latent_upscale_model = model
+                    elif keys_exist_in_script("anim"):
+                            latent_upscale_model = \
+                            AnimateDiffLoaderWithContext().load_mm_and_inject_params(latent_upscale_model, motion_model,
+                                                                                     beta_schedule, context_options)[0]
+
+                    # Generate Preprocessor images and Apply Control Net
+                    if hires_control_net is not None:
+                        # Attempt to load previous "cnet_imgs" if previous images were loaded and preprocessor is same
+                        if cnet_imgs is True:
+                            cnet_imgs = load_ksampler_results("cnet_img", my_unique_id, [preprocessor])
+                        # If cnet_imgs is None, generate new ones
+                        if cnet_imgs is None:
+                            if images is None:
+                                images = vae_decode_latent(vae, samples, vae_decode)
+                                store_ksampler_results("image", my_unique_id, images)
+                            cnet_imgs = AIO_Preprocessor().execute(preprocessor, images)[0]
+                            store_ksampler_results("cnet_img", my_unique_id, cnet_imgs, [preprocessor])
+                        positive = ControlNetApply().apply_controlnet(positive, hires_control_net, cnet_imgs, hires_cnet_strength)[0]
+                        
+                    # Iterate for the given number of iterations
+                    if upscale_type == "latent":
+                        for _ in range(iterations):
+                            upscaled_latent_image = latent_upscale_function().upscale(samples, latent_upscaler, upscale_by)[0]
+                            samples = KSampler().sample(latent_upscale_model, hires_seed, hires_steps, cfg, sampler_name, scheduler,
+                                                            positive, negative, upscaled_latent_image, denoise=hires_denoise)[0]
+                            images = None # set to None when samples is updated
+                    elif upscale_type == "pixel":
+                        if images is None:
+                            images = vae_decode_latent(vae, samples, vae_decode)
+                            store_ksampler_results("image", my_unique_id, images)
+                        images = ImageUpscaleWithModel().upscale(pixel_upscale_model, images)[0]
+                        images = ImageScaleBy().upscale(images, "nearest-exact", upscale_by/4)[0]
+
+                # ------------------------------------------------------------------------------------------------------
                 # Check if "tile" exists in the script after main sampling has taken place
                 if keys_exist_in_script("tile"):
                     # Unpack the tuple from the script's "tile" key
-                    upscale_by, tile_controlnet, tile_size, tiling_strategy, tiling_steps, tiled_denoise,\
-                        blenderneko_tiled_nodes = script["tile"]
-                    # VAE Decode samples
-                    image = vae_decode_latent(vae, samples, vae_decode)
+                    upscale_by, tile_size, tiling_strategy, tiling_steps, tile_seed, tiled_denoise,\
+                        tile_controlnet, strength = script["tile"]
+
+                    # Decode image, store if first decode
+                    if images is None:
+                        images = vae_decode_latent(vae, samples, vae_decode)
+                        if not any(keys_exist_in_script(key) for key in ["xyplot", "hiresfix"]):
+                            store_ksampler_results("image", my_unique_id, images)
+
                     # Upscale image
-                    upscaled_image = ImageScaleBy().upscale(image, "nearest-exact", upscale_by)[0]
+                    upscaled_image = ImageScaleBy().upscale(images, "nearest-exact", upscale_by)[0]
                     upscaled_latent = vae_encode_image(vae, upscaled_image, vae_decode)
-                    # Apply Control Net using upscaled_image and loaded control_net
-                    positive = ControlNetApply().apply_controlnet(positive, tile_controlnet, upscaled_image, 1)[0]
+
+                    # If using Control Net, Apply Control Net using upscaled_image and loaded control_net
+                    if tile_controlnet is not None:
+                        positive = ControlNetApply().apply_controlnet(positive, tile_controlnet, upscaled_image, 1)[0]
+
                     # Sample latent
-                    TSampler = blenderneko_tiled_nodes.TiledKSampler
-                    samples = TSampler().sample(model, seed-1, tile_size, tile_size, tiling_strategy, tiling_steps, cfg,
+                    TSampler = bnk_tiled_samplers.TiledKSampler
+                    samples = TSampler().sample(model, tile_seed, tile_size, tile_size, tiling_strategy, tiling_steps, cfg,
                                                 sampler_name, scheduler, positive, negative, upscaled_latent,
                                                 denoise=tiled_denoise)[0]
-            return samples
+                    images = None  # set to None when samples is updated
+
+                # ------------------------------------------------------------------------------------------------------
+                # Check if "anim" exists in the script after the main sampling has taken place
+                if keys_exist_in_script("anim"):
+                    if images is None:
+                        images = vae_decode_latent(vae, samples, vae_decode)
+                        if not any(keys_exist_in_script(key) for key in ["xyplot", "hiresfix", "tile"]):
+                            store_ksampler_results("image", my_unique_id, images)
+                    gifs = AnimateDiffCombine().generate_gif(images, frame_rate, loop_count, format=format,
+                    pingpong=pingpong, save_image=save_image, prompt=prompt, extra_pnginfo=extra_pnginfo)["ui"]["gifs"]
+
+                # ------------------------------------------------------------------------------------------------------
+
+                # Decode image if not yet decoded
+                if "true" in vae_decode:
+                    if images is None:
+                        images = vae_decode_latent(vae, samples, vae_decode)
+                        # Store decoded image as base image of no script is detected
+                        if all(not keys_exist_in_script(key) for key in ["xyplot", "hiresfix", "tile", "anim"]):
+                            store_ksampler_results("image", my_unique_id, images)
+
+                # Append Control Net Images (if exist)
+                if cnet_imgs is not None and not True:
+                    if preprocessor_imgs and upscale_type == "latent":
+                        if keys_exist_in_script("xyplot"):
+                            print(
+                                f"{warning('HighRes-Fix Warning:')} Preprocessor images auto-disabled when XY Plotting.")
+                        else:
+                            # Resize cnet_imgs if necessary and stack
+                            if images.shape[1:3] != cnet_imgs.shape[1:3]:  # comparing height and width
+                                cnet_imgs = quick_resize(cnet_imgs, images.shape)
+                            images = torch.cat([images, cnet_imgs], dim=0)
+
+                # Define preview images
+                if keys_exist_in_script("anim"):
+                    preview = {"gifs": gifs, "images": list()}
+                elif preview_method == "none" or (preview_method == "vae_decoded_only" and vae_decode == "false"):
+                    preview = {"images": list()}
+                elif images is not None:
+                    preview = PreviewImage().save_images(images, prompt=prompt, extra_pnginfo=extra_pnginfo)["ui"]
+
+                # Define a dummy output image
+                if images is None and vae_decode == "false":
+                    images = TSC_KSampler.empty_image
+
+            finally:
+                # Restore global changes
+                set_preview_method(previous_preview_method)
+                comfy.samplers.KSampler = original_KSampler
+                comfy.sample.prepare_noise = original_prepare_noise
+
+            return samples, images, gifs, preview
 
         # ---------------------------------------------------------------------------------------------------------------
         # Clean globally stored objects of non-existant nodes
         globals_cleanup(prompt)
 
-        # Init last_preview_images
-        if get_value_by_id("preview_images", my_unique_id) is None:
-            last_preview_images = list()
-        else:
-            last_preview_images = get_value_by_id("preview_images", my_unique_id)
-
-        # Init last_latent
-        if get_value_by_id("latent", my_unique_id) is None:
-            last_latent = latent_image
-        else:
-            last_latent = {"samples": None}
-            last_latent = get_value_by_id("latent", my_unique_id)
-
-        # Init last_output_images
-        if get_value_by_id("output_images", my_unique_id) == None:
-            last_output_images = TSC_KSampler.empty_image
-        else:
-            last_output_images = get_value_by_id("output_images", my_unique_id)
-
-        # Define filename_prefix
-        filename_prefix = "KSeff_{}".format(my_unique_id)
-
         # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-        # If the sampler state is "Sample" or "Script" without XY Plot
-        if sampler_state == "Sample" or (sampler_state == "Script" and not keys_exist_in_script("xyplot")):
+        # If not XY Plotting
+        if not keys_exist_in_script("xyplot"):
 
-            # Store the global preview method
-            previous_preview_method = global_preview_method()
-
-            # Change the global preview method temporarily during sampling
-            set_preview_method(preview_method)
-
-            # Define commands arguments to send to front-end via websocket
-            if preview_method != "none" and "true" in vae_decode:
-                send_command_to_frontend(startListening=True, maxCount=steps-1, sendBlob=False)
-
-            samples = sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-                                          latent_image, denoise, sampler_type, add_noise, start_at_step, end_at_step,
-                                          return_with_leftover_noise, refiner_model, refiner_positive, refiner_negative,
-                                          vae, vae_decode, sampler_state)
-
-            # Cache samples in the 'last_helds' dictionary "latent"
-            update_value_by_id("latent", my_unique_id, samples)
-
-            # Define node output images & next Hold's vae_decode behavior
-            output_images = node_images = get_latest_image() ###
-            if vae_decode == "false":
-                update_value_by_id("vae_decode_flag", my_unique_id, True)
-                if preview_method == "none" or output_images == list():
-                    output_images = TSC_KSampler.empty_image
-            else:
-                update_value_by_id("vae_decode_flag", my_unique_id, False)
-                decoded_image = vae_decode_latent(vae, samples, vae_decode)
-                output_images = node_images = decoded_image
-
-            # Cache output images to global 'last_helds' dictionary "output_images"
-            update_value_by_id("output_images", my_unique_id, output_images)
-
-            # Generate preview_images (PIL)
-            preview_images = preview_image(node_images, filename_prefix)
-
-            # Cache node preview images to global 'last_helds' dictionary "preview_images"
-            update_value_by_id("preview_images", my_unique_id, preview_images)
-
-            # Set xy_plot_flag to 'False' and set the stored (if any) XY Plot image tensor to 'None'
-            update_value_by_id("xy_plot_flag", my_unique_id, False)
-            update_value_by_id("xy_plot_image", my_unique_id, None)
-
-            if "output only" in vae_decode:
-                preview_images = list()
-
-            if preview_method != "none":
-                # Send message to front-end to revoke the last blob image from browser's memory (fixes preview duplication bug)
-                send_command_to_frontend(startListening=False)
+            # Process latent image
+            samples, images, gifs, preview = process_latent_image(model, seed, steps, cfg, sampler_name, scheduler,
+                                            positive, negative, latent_image, denoise, sampler_type, add_noise,
+                                            start_at_step, end_at_step, return_with_leftover_noise, refiner_model,
+                                            refiner_positive, refiner_negative, vae, vae_decode, preview_method)
 
             if sampler_type == "sdxl":
-                result = (sdxl_tuple, samples, vae, output_images,)
+                result = (sdxl_tuple, samples, vae, images,)
             else:
-                result = (model, positive, negative, samples, vae, output_images,)
-            return result if not preview_images and preview_method != "none" else {"ui": {"images": preview_images}, "result": result}
+                result = (model, positive, negative, samples, vae, images,)
+                
+            if preview is None:
+                return {"result": result}
+            else:
+                return {"ui": preview, "result": result}
 
         # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-        # If the sampler state is "Hold"
-        elif sampler_state == "Hold":
-            output_images = last_output_images
-            preview_images = last_preview_images if "true" in vae_decode else list()
-
-            if get_value_by_id("vae_decode_flag", my_unique_id):
-                if "true" in vae_decode or "output only" in vae_decode:
-                    output_images = node_images = vae_decode_latent(vae, last_latent, vae_decode)
-                    update_value_by_id("vae_decode_flag", my_unique_id, False)
-                    update_value_by_id("output_images", my_unique_id, output_images)
-                    preview_images = preview_image(node_images, filename_prefix)
-                    update_value_by_id("preview_images", my_unique_id, preview_images)
-                    if "output only" in vae_decode:
-                        preview_images = list()
-
-            # Check if holding an XY Plot image
-            elif get_value_by_id("xy_plot_flag", my_unique_id):
-                # Check if XY Plot node is connected
-                if keys_exist_in_script("xyplot"):
-                    # Extract the 'xyplot_as_output_image' input parameter from the connected xy_plot
-                    _, _, _, _, _, _, _, xyplot_as_output_image, _, _ = script["xyplot"]
-                    if xyplot_as_output_image == True:
-                        output_images = get_value_by_id("xy_plot_image", my_unique_id)
-                    else:
-                        output_images = get_value_by_id("output_images", my_unique_id)
-                    preview_images = last_preview_images
-                else:
-                    output_images = last_output_images
-                    preview_images = last_preview_images if "true" in vae_decode else list()
-
-            if sampler_type == "sdxl":
-                result = (sdxl_tuple, last_latent, vae, output_images,)
-            else:
-                result = (model, positive, negative, last_latent, vae, output_images,)
-            return {"ui": {"images": preview_images}, "result": result}
-
-        # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-        # If the sampler state is "Script" with XY Plot
-        elif sampler_state == "Script" and keys_exist_in_script("xyplot"):
+        # If XY Plot
+        elif keys_exist_in_script("xyplot"):
 
             # If no vae connected, throw errors
             if vae == (None,):
                 print(f"{error('KSampler(Efficient) Error:')} VAE input must be connected in order to use the XY Plot script.")
+
                 return {"ui": {"images": list()},
-                        "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
+                        "result": (model, positive, negative, latent_image, vae, TSC_KSampler.empty_image,)}
 
             # If vae_decode is not set to true, print message that changing it to true
             if "true" not in vae_decode:
@@ -823,14 +812,14 @@ class TSC_KSampler:
                     f"\nDisallowed XY_types for this KSampler are: {', '.join(disallowed_XY_types)}.")
 
                 return {"ui": {"images": list()},
-                    "result": (model, positive, negative, last_latent, vae, TSC_KSampler.empty_image,)}
+                    "result": (model, positive, negative, latent_image, vae, TSC_KSampler.empty_image,)}
 
             #_______________________________________________________________________________________________________
             # Unpack Effficient Loader dependencies
             if dependencies is not None:
                 vae_name, ckpt_name, clip, clip_skip, refiner_name, refiner_clip, refiner_clip_skip,\
-                    positive_prompt, negative_prompt, ascore, empty_latent_width, empty_latent_height,\
-                    lora_stack, cnet_stack = dependencies
+                    positive_prompt, negative_prompt, token_normalization, weight_interpretation, ascore,\
+                    empty_latent_width, empty_latent_height, lora_stack, cnet_stack = dependencies
 
             #_______________________________________________________________________________________________________
             # Printout XY Plot values to be processed
@@ -852,7 +841,7 @@ class TSC_KSampler:
                             else (os.path.basename(v[0]), v[1]) if v[2] is None
                             else (os.path.basename(v[0]),) + v[1:] for v in value]
 
-                elif (type_ == "LoRA" or type_ == "LoRA Stacks") and isinstance(value, list):
+                elif type_ == "LoRA" and isinstance(value, list):
                     # Return only the first Tuple of each inner array
                     return [[(os.path.basename(v[0][0]),) + v[0][1:], "..."] if len(v) > 1
                             else [(os.path.basename(v[0][0]),) + v[0][1:]] for v in value]
@@ -953,7 +942,6 @@ class TSC_KSampler:
                 "Checkpoint",
                 "Refiner",
                 "LoRA",
-                "LoRA Stacks",
                 "VAE",
             ]
             conditioners = {
@@ -998,9 +986,6 @@ class TSC_KSampler:
             # Create a list of tuples with types and values
             type_value_pairs = [(X_type, X_value.copy()), (Y_type, Y_value.copy())]
 
-            # Replace "LoRA Stacks" with "LoRA"
-            type_value_pairs = [('LoRA' if t == 'LoRA Stacks' else t, v) for t, v in type_value_pairs]
-
             # Iterate over type-value pairs
             for t, v in type_value_pairs:
                 if t in dict_map:
@@ -1043,7 +1028,7 @@ class TSC_KSampler:
             elif X_type == "Refiner":
                 ckpt_dict = []
                 lora_dict = []
-            elif X_type in ("LoRA", "LoRA Stacks"):
+            elif X_type == "LoRA":
                 ckpt_dict = []
                 refn_dict = []
 
@@ -1064,7 +1049,7 @@ class TSC_KSampler:
                                 lora_stack, cnet_stack, var_label, num_label):
 
                 # Define default max label size limit
-                max_label_len = 36
+                max_label_len = 42
 
                 # If var_type is "AddNoise", update 'add_noise' with 'var', and generate text label
                 if var_type == "AddNoise":
@@ -1206,7 +1191,7 @@ class TSC_KSampler:
                     text = f"RefClipSkip ({refiner_clip_skip[0]})"
 
                 elif "LoRA" in var_type:
-                    if not lora_stack or var_type == "LoRA Stacks":
+                    if not lora_stack:
                         lora_stack = var.copy()
                     else:
                         # Updating the first tuple of lora_stack
@@ -1216,7 +1201,7 @@ class TSC_KSampler:
                     lora_name, lora_model_wt, lora_clip_wt = lora_stack[0]
                     lora_filename = os.path.splitext(os.path.basename(lora_name))[0]
 
-                    if var_type == "LoRA" or var_type == "LoRA Stacks":
+                    if var_type == "LoRA":
                         if len(lora_stack) == 1:
                             lora_model_wt = format(float(lora_model_wt), ".2f").rstrip('0').rstrip('.')
                             lora_clip_wt = format(float(lora_clip_wt), ".2f").rstrip('0').rstrip('.')
@@ -1339,7 +1324,7 @@ class TSC_KSampler:
                 # Note: Index is held at 0 when Y_type == "Nothing"
 
                 # Load Checkpoint if required. If Y_type is LoRA, required models will be loaded by load_lora func.
-                if (X_type == "Checkpoint" and index == 0 and Y_type not in ("LoRA", "LoRA Stacks")):
+                if (X_type == "Checkpoint" and index == 0 and Y_type != "LoRA"):
                     if lora_stack is None:
                         model, clip, _ = load_checkpoint(ckpt_name, xyplot_id, cache=cache[1])
                     else: # Load Efficient Loader LoRA
@@ -1348,11 +1333,11 @@ class TSC_KSampler:
                     encode = True
 
                 # Load LoRA if required
-                elif (X_type in ("LoRA", "LoRA Stacks") and index == 0):
+                elif (X_type == "LoRA" and index == 0):
                     # Don't cache Checkpoints
                     model, clip = load_lora(lora_stack, ckpt_name, xyplot_id, cache=cache[2])
                     encode = True
-                elif Y_type in ("LoRA", "LoRA Stacks"):  # X_type must be Checkpoint, so cache those as defined
+                elif Y_type == "LoRA":  # X_type must be Checkpoint, so cache those as defined
                     model, clip = load_lora(lora_stack, ckpt_name, xyplot_id,
                                             cache=None, ckpt_cache=cache[1])
                     encode = True
@@ -1381,9 +1366,9 @@ class TSC_KSampler:
                 # Encode base prompt
                 if encode == True:
                     positive, negative, clip = \
-                        encode_prompts(positive_prompt, negative_prompt, clip, clip_skip, refiner_clip,
-                                       refiner_clip_skip, ascore, sampler_type == "sdxl", empty_latent_width,
-                                       empty_latent_height, return_type="base")
+                        encode_prompts(positive_prompt, negative_prompt, token_normalization, weight_interpretation,
+                                       clip, clip_skip, refiner_clip, refiner_clip_skip, ascore, sampler_type == "sdxl",
+                                       empty_latent_width, empty_latent_height, return_type="base")
                     # Apply ControlNet Stack if given
                     if cnet_stack:
                         controlnet_conditioning = TSC_Apply_ControlNet_Stack().apply_cnet_stack(positive, negative, cnet_stack)
@@ -1391,9 +1376,9 @@ class TSC_KSampler:
 
                 if encode_refiner == True:
                     refiner_positive, refiner_negative, refiner_clip = \
-                        encode_prompts(positive_prompt, negative_prompt, clip, clip_skip, refiner_clip,
-                                       refiner_clip_skip, ascore, sampler_type == "sdxl", empty_latent_width,
-                                       empty_latent_height, return_type="refiner")
+                        encode_prompts(positive_prompt, negative_prompt, token_normalization, weight_interpretation,
+                                       clip, clip_skip, refiner_clip, refiner_clip_skip, ascore, sampler_type == "sdxl",
+                                       empty_latent_width, empty_latent_height, return_type="refiner")
 
                 # Load VAE if required
                 if (X_type == "VAE" and index == 0) or Y_type == "VAE":
@@ -1421,19 +1406,17 @@ class TSC_KSampler:
                         latent_list.append(latent)
 
                 if capsule_result is None:
-                    if preview_method != "none":
-                        send_command_to_frontend(startListening=True, maxCount=steps - 1, sendBlob=False)
 
-                    samples = sample_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-                                                  latent_image, denoise, sampler_type, add_noise, start_at_step, end_at_step,
-                                                  return_with_leftover_noise, refiner_model, refiner_positive, refiner_negative,
-                                                  vae, vae_decode, sampler_state)
+                    samples, images, _, _ = process_latent_image(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
+                                                  latent_image, denoise, sampler_type, add_noise, start_at_step,
+                                                  end_at_step, return_with_leftover_noise, refiner_model,
+                                                  refiner_positive, refiner_negative, vae, vae_decode, preview_method)
 
                     # Add the latent tensor to the tensors list
                     latent_list.append(samples)
 
-                    # Decode the latent tensor
-                    image = vae_decode_latent(vae, samples, vae_decode)
+                    # Decode the latent tensor if required
+                    image = images if images is not None else vae_decode_latent(vae, samples, vae_decode)
 
                     if xy_capsule is not None:
                         xy_capsule.set_result(image, samples)
@@ -1463,12 +1446,6 @@ class TSC_KSampler:
 
             # Store types in a Tuple for easy function passing
             types = (X_type, Y_type)
-
-            # Store the global preview method
-            previous_preview_method = global_preview_method()
-
-            # Change the global preview method temporarily during this node's execution
-            set_preview_method(preview_method)
 
             # Clone original model parameters
             def clone_or_none(*originals):
@@ -1522,11 +1499,10 @@ class TSC_KSampler:
 
                 elif X_type != "Nothing" and Y_type != "Nothing":
                     for Y_index, Y in enumerate(Y_value):
-                        if Y_type == "XY_Capsule" or X_type == "XY_Capsule":
-                            model, clip, refiner_model, refiner_clip = \
-                                clone_or_none(original_model, original_clip, original_refiner_model, original_refiner_clip)
 
                         if Y_type == "XY_Capsule" and X_type == "XY_Capsule":
+                            model, clip, refiner_model, refiner_clip = \
+                                clone_or_none(original_model, original_clip, original_refiner_model, original_refiner_clip)
                             Y.set_x_capsule(X)
 
                         # Define Y parameters and generate labels
@@ -1572,7 +1548,7 @@ class TSC_KSampler:
                     clear_cache_by_exception(xyplot_id, lora_dict=[], refn_dict=[])
                 elif X_type == "Refiner":
                     clear_cache_by_exception(xyplot_id, ckpt_dict=[], lora_dict=[])
-                elif X_type in ("LoRA", "LoRA Stacks"):
+                elif X_type == "LoRA":
                     clear_cache_by_exception(xyplot_id, ckpt_dict=[], refn_dict=[])
 
             # __________________________________________________________________________________________________________
@@ -1580,7 +1556,7 @@ class TSC_KSampler:
             def print_plot_variables(X_type, Y_type, X_value, Y_value, add_noise, seed, steps, start_at_step, end_at_step,
                                      return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
                                      clip_skip, refiner_name, refiner_clip_skip, ascore, lora_stack, cnet_stack, sampler_type,
-                                     num_rows, num_cols, latent_height, latent_width):
+                                     num_rows, num_cols, i_height, i_width):
 
                 print("-" * 40)  # Print an empty line followed by a separator line
                 print(f"{xyplot_message('XY Plot Results:')}")
@@ -1672,7 +1648,7 @@ class TSC_KSampler:
                     lora_name = lora_wt = lora_model_str = lora_clip_str = None
 
                     # Check for all possible LoRA types
-                    lora_types = ["LoRA", "LoRA Stacks", "LoRA Batch", "LoRA Wt", "LoRA MStr", "LoRA CStr"]
+                    lora_types = ["LoRA", "LoRA Batch", "LoRA Wt", "LoRA MStr", "LoRA CStr"]
 
                     if X_type not in lora_types and Y_type not in lora_types:
                         if lora_stack:
@@ -1685,7 +1661,7 @@ class TSC_KSampler:
                     else:
                         if X_type in lora_types:
                             value = get_lora_sublist_name(X_type, X_value)
-                            if X_type in ("LoRA", "LoRA Stacks"):
+                            if  X_type == "LoRA":
                                 lora_name = value
                                 lora_model_str = None
                                 lora_clip_str = None
@@ -1707,7 +1683,7 @@ class TSC_KSampler:
 
                         if Y_type in lora_types:
                             value = get_lora_sublist_name(Y_type, Y_value)
-                            if Y_type in ("LoRA", "LoRA Stacks"):
+                            if  Y_type == "LoRA":
                                 lora_name = value
                                 lora_model_str = None
                                 lora_clip_str = None
@@ -1730,13 +1706,13 @@ class TSC_KSampler:
                     return lora_name, lora_wt, lora_model_str, lora_clip_str
 
                 def get_lora_sublist_name(lora_type, lora_value):
-                    if lora_type in ("LoRA", "LoRA Batch", "LoRA Stacks"):
+                    if lora_type == "LoRA" or lora_type == "LoRA Batch":
                         formatted_sublists = []
                         for sublist in lora_value:
                             formatted_entries = []
                             for x in sublist:
                                 base_name = os.path.splitext(os.path.basename(str(x[0])))[0]
-                                formatted_str = f"{base_name}({round(x[1], 3)},{round(x[2], 3)})" if lora_type in ("LoRA", "LoRA Stacks") else f"{base_name}"
+                                formatted_str = f"{base_name}({round(x[1], 3)},{round(x[2], 3)})" if lora_type == "LoRA" else f"{base_name}"
                                 formatted_entries.append(formatted_str)
                             formatted_sublists.append(f"{', '.join(formatted_entries)}")
                         return "\n      ".join(formatted_sublists)
@@ -1820,7 +1796,7 @@ class TSC_KSampler:
                 print(f"(X) {X_type}")
                 print(f"(Y) {Y_type}")
                 print(f"img_count: {len(X_value)*len(Y_value)}")
-                print(f"img_dims: {latent_height} x {latent_width}")
+                print(f"img_dims: {i_height} x {i_width}")
                 print(f"plot_dim: {num_cols} x {num_rows}")
                 print(f"ckpt: {ckpt_name if ckpt_name is not None else ''}")
                 if clip_skip:
@@ -1921,22 +1897,19 @@ class TSC_KSampler:
                     print(f"cnet_end%: {', '.join(cnet_end_pct) if isinstance(cnet_end_pct, list) else cnet_end_pct}")
 
             # ______________________________________________________________________________________________________
-            def adjusted_font_size(text, initial_font_size, latent_width):
+            def adjusted_font_size(text, initial_font_size, i_width):
                 font = ImageFont.truetype(str(Path(font_path)), initial_font_size)
                 text_width = font.getlength(text)
 
-                if text_width > (latent_width * 0.9):
+                if text_width > (i_width * 0.9):
                     scaling_factor = 0.9  # A value less than 1 to shrink the font size more aggressively
-                    new_font_size = int(initial_font_size * (latent_width / text_width) * scaling_factor)
+                    new_font_size = int(initial_font_size * (i_width / text_width) * scaling_factor)
                 else:
                     new_font_size = initial_font_size
 
                 return new_font_size
 
             # ______________________________________________________________________________________________________
-
-            # Disable vae decode on next Hold
-            update_value_by_id("vae_decode_flag", my_unique_id, False)
 
             def rearrange_list_A(arr, num_cols, num_rows):
                 new_list = []
@@ -1971,13 +1944,13 @@ class TSC_KSampler:
                 latent_list = rearrange_list_A(latent_list, num_cols, num_rows)
 
             # Extract final image dimensions
-            latent_height, latent_width = latent_list[0]['samples'].shape[2] * 8, latent_list[0]['samples'].shape[3] * 8
+            i_height, i_width = image_tensor_list[0].shape[1], image_tensor_list[0].shape[2]
 
             # Print XY Plot Results
             print_plot_variables(X_type, Y_type, X_value, Y_value, add_noise, seed,  steps, start_at_step, end_at_step,
                                  return_with_leftover_noise, cfg, sampler_name, scheduler, denoise, vae_name, ckpt_name,
                                  clip_skip, refiner_name, refiner_clip_skip, ascore, lora_stack, cnet_stack,
-                                 sampler_type, num_rows, num_cols, latent_height, latent_width)
+                                 sampler_type, num_rows, num_cols, i_height, i_width)
 
             # Concatenate the 'samples' and 'noise_mask' tensors along the first dimension (dim=0)
             keys = latent_list[0].keys()
@@ -1988,10 +1961,10 @@ class TSC_KSampler:
             latent_list = result
 
             # Store latent_list as last latent
-            update_value_by_id("latent", my_unique_id, latent_list)
+            ###update_value_by_id("latent", my_unique_id, latent_list)
 
             # Calculate the dimensions of the white background image
-            border_size_top = latent_width // 15
+            border_size_top = i_width // 15
 
             # Longest Y-label length
             if len(Y_label) > 0:
@@ -2005,28 +1978,28 @@ class TSC_KSampler:
             if Y_label_orientation == "Vertical":
                 border_size_left = border_size_top
             else:  # Assuming Y_label_orientation is "Horizontal"
-                # border_size_left is now min(latent_width, latent_height) plus 20% of the difference between the two
-                border_size_left = min(latent_width, latent_height) + int(0.2 * abs(latent_width - latent_height))
+                # border_size_left is now min(i_width, i_height) plus 20% of the difference between the two
+                border_size_left = min(i_width, i_height) + int(0.2 * abs(i_width - i_height))
                 border_size_left = int(border_size_left * Y_label_scale)
 
             # Modify the border size, background width and x_offset initialization based on Y_type and Y_label_orientation
             if Y_type == "Nothing":
-                bg_width = num_cols * latent_width + (num_cols - 1) * grid_spacing
+                bg_width = num_cols * i_width + (num_cols - 1) * grid_spacing
                 x_offset_initial = 0
             else:
                 if Y_label_orientation == "Vertical":
-                    bg_width = num_cols * latent_width + (num_cols - 1) * grid_spacing + 3 * border_size_left
+                    bg_width = num_cols * i_width + (num_cols - 1) * grid_spacing + 3 * border_size_left
                     x_offset_initial = border_size_left * 3
                 else:  # Assuming Y_label_orientation is "Horizontal"
-                    bg_width = num_cols * latent_width + (num_cols - 1) * grid_spacing + border_size_left
+                    bg_width = num_cols * i_width + (num_cols - 1) * grid_spacing + border_size_left
                     x_offset_initial = border_size_left
 
             # Modify the background height based on X_type
             if X_type == "Nothing":
-                bg_height = num_rows * latent_height + (num_rows - 1) * grid_spacing
+                bg_height = num_rows * i_height + (num_rows - 1) * grid_spacing
                 y_offset = 0
             else:
-                bg_height = num_rows * latent_height + (num_rows - 1) * grid_spacing + 3 * border_size_top
+                bg_height = num_rows * i_height + (num_rows - 1) * grid_spacing + 3 * border_size_top
                 y_offset = border_size_top * 3
 
             # Create the white background image
@@ -2084,8 +2057,8 @@ class TSC_KSampler:
 
                         # Add the corresponding Y_value as a label to the left of the image
                         if Y_label_orientation == "Vertical":
-                            initial_font_size = int(48 * latent_width / 512)  # Adjusting this to be same as X_label size
-                            font_size = adjusted_font_size(text, initial_font_size, latent_width)
+                            initial_font_size = int(48 * i_width / 512)  # Adjusting this to be same as X_label size
+                            font_size = adjusted_font_size(text, initial_font_size, i_width)
                         else:  # Assuming Y_label_orientation is "Horizontal"
                             initial_font_size = int(48 *  (border_size_left/Y_label_scale) / 512)  # Adjusting this to be same as X_label size
                             font_size = adjusted_font_size(text, initial_font_size,  int(border_size_left/Y_label_scale))
@@ -2132,17 +2105,11 @@ class TSC_KSampler:
 
             xy_plot_image = pil2tensor(background)
 
-        # Set xy_plot_flag to 'True' and cache the xy_plot_image tensor
-        update_value_by_id("xy_plot_image", my_unique_id, xy_plot_image)
-        update_value_by_id("xy_plot_flag", my_unique_id, True)
+         # Generate the preview_images
+        preview_images = PreviewImage().save_images(xy_plot_image)["ui"]["images"]
 
-         # Generate the preview_images and cache results
-        preview_images = preview_image(xy_plot_image, filename_prefix)
-        update_value_by_id("preview_images", my_unique_id, preview_images)
-
-        # Generate output_images and cache results
+        # Generate output_images
         output_images = torch.stack([tensor.squeeze() for tensor in image_tensor_list])
-        update_value_by_id("output_images", my_unique_id, output_images)
 
         # Set the output_image the same as plot image defined by 'xyplot_as_output_image'
         if xyplot_as_output_image == True:
@@ -2153,13 +2120,6 @@ class TSC_KSampler:
             print_loaded_objects_entries(xyplot_id, prompt)
 
         print("-" * 40)  # Print an empty line followed by a separator line
-
-        # Set the preview method back to its original state
-        set_preview_method(previous_preview_method)
-
-        if preview_method != "none":
-            # Send message to front-end to revoke the last blob image from browser's memory (fixes preview duplication bug)
-            send_command_to_frontend(startListening=False)
 
         if sampler_type == "sdxl":
             sdxl_tuple = original_model, original_clip, original_positive, original_negative,\
@@ -2176,8 +2136,7 @@ class TSC_KSamplerAdvanced(TSC_KSampler):
     @classmethod
     def INPUT_TYPES(cls):
         return {"required":
-                    {"sampler_state": (["Sample", "Hold", "Script"],),
-                     "model": ("MODEL",),
+                    {"model": ("MODEL",),
                      "add_noise": (["enable", "disable"],),
                      "noise_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                      "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
@@ -2204,11 +2163,11 @@ class TSC_KSamplerAdvanced(TSC_KSampler):
     FUNCTION = "sample_adv"
     CATEGORY = "Efficiency Nodes/Sampling"
 
-    def sample_adv(self, sampler_state, model, add_noise, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative,
+    def sample_adv(self, model, add_noise, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative,
                latent_image, start_at_step, end_at_step, return_with_leftover_noise, preview_method, vae_decode,
                prompt=None, extra_pnginfo=None, my_unique_id=None, optional_vae=(None,), script=None):
 
-        return super().sample(sampler_state, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative,
+        return super().sample(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative,
                latent_image, preview_method, vae_decode, denoise=1.0, prompt=prompt, extra_pnginfo=extra_pnginfo, my_unique_id=my_unique_id,
                optional_vae=optional_vae, script=script, add_noise=add_noise, start_at_step=start_at_step,end_at_step=end_at_step,
                        return_with_leftover_noise=return_with_leftover_noise,sampler_type="advanced")
@@ -2220,8 +2179,7 @@ class TSC_KSamplerSDXL(TSC_KSampler):
     @classmethod
     def INPUT_TYPES(cls):
         return {"required":
-                    {"sampler_state": (["Sample", "Hold", "Script"],),
-                     "sdxl_tuple": ("SDXL_TUPLE",),
+                    {"sdxl_tuple": ("SDXL_TUPLE",),
                      "noise_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                      "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                      "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
@@ -2233,7 +2191,7 @@ class TSC_KSamplerSDXL(TSC_KSampler):
                      "preview_method": (["auto", "latent2rgb", "taesd", "none"],),
                      "vae_decode": (["true", "true (tiled)", "false", "output only", "output only (tiled)"],),
                      },
-                "optional": {"optional_vae": ("VAE",),# "refiner_extras": ("REFINER_EXTRAS",),
+                "optional": {"optional_vae": ("VAE",),
                              "script": ("SCRIPT",),},
                 "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO", "my_unique_id": "UNIQUE_ID",},
                 }
@@ -2244,37 +2202,16 @@ class TSC_KSamplerSDXL(TSC_KSampler):
     FUNCTION = "sample_sdxl"
     CATEGORY = "Efficiency Nodes/Sampling"
 
-    def sample_sdxl(self, sampler_state, sdxl_tuple, noise_seed, steps, cfg, sampler_name, scheduler, latent_image,
+    def sample_sdxl(self, sdxl_tuple, noise_seed, steps, cfg, sampler_name, scheduler, latent_image,
                start_at_step, refine_at_step, preview_method, vae_decode, prompt=None, extra_pnginfo=None,
                my_unique_id=None, optional_vae=(None,), refiner_extras=None, script=None):
         # sdxl_tuple sent through the 'model' channel
-        # refine_extras sent through the 'positive' channel
         negative = None
-        return super().sample(sampler_state, sdxl_tuple, noise_seed, steps, cfg, sampler_name, scheduler,
+        return super().sample(sdxl_tuple, noise_seed, steps, cfg, sampler_name, scheduler,
                refiner_extras, negative, latent_image, preview_method, vae_decode, denoise=1.0,
                prompt=prompt, extra_pnginfo=extra_pnginfo, my_unique_id=my_unique_id, optional_vae=optional_vae,
                script=script, add_noise=None, start_at_step=start_at_step, end_at_step=refine_at_step,
                return_with_leftover_noise=None,sampler_type="sdxl")
-
-#=======================================================================================================================
-# TSC KSampler SDXL Refiner Extras (DISABLED)
-'''
-class TSC_SDXL_Refiner_Extras:
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {"seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                            "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
-                            "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
-                            "scheduler": (comfy.samplers.KSampler.SCHEDULERS,)}}
-
-    RETURN_TYPES = ("REFINER_EXTRAS",)
-    FUNCTION = "pack_refiner_extras"
-    CATEGORY = "Efficiency Nodes/Misc"
-
-    def pack_refiner_extras(self, seed, cfg, sampler_name, scheduler):
-        return ((seed, cfg, sampler_name, scheduler),)
-'''
 
 ########################################################################################################################
 # Common XY Plot Functions/Variables
@@ -2379,7 +2316,7 @@ class TSC_XYplot:
         # Check that dependencies are connected for specific plot types
         encode_types = {
             "Checkpoint", "Refiner",
-            "LoRA", "LoRA Stacks", "LoRA Batch", "LoRA Wt", "LoRA MStr", "LoRA CStr",
+            "LoRA", "LoRA Batch", "LoRA Wt", "LoRA MStr", "LoRA CStr",
             "Positive Prompt S/R", "Negative Prompt S/R",
             "AScore+", "AScore-",
             "Clip Skip", "Clip Skip (Refiner)",
@@ -2395,13 +2332,8 @@ class TSC_XYplot:
         # Check if both X_type and Y_type are special lora_types
         lora_types = {"LoRA Batch", "LoRA Wt", "LoRA MStr", "LoRA CStr"}
         if (X_type in lora_types and Y_type not in lora_types) or (Y_type in lora_types and X_type not in lora_types):
-            print(f"{error('XY Plot Error:')} Both X and Y must be connected to use the 'LoRA Plot' node.")
-            return (None,)
-
-        # Do not allow LoRA and LoRA Stacks
-        lora_types = {"LoRA", "LoRA Stacks"}
-        if (X_type in lora_types and Y_type in lora_types):
-            print(f"{error('XY Plot Error:')} X and Y input types must be different.")
+            print(
+                f"{error('XY Plot Error:')} Both X and Y must be connected to use the 'LoRA Plot' node.")
             return (None,)
 
         # Clean Schedulers from Sampler data (if other type is Scheduler)
@@ -3148,7 +3080,7 @@ class TSC_XYplot_LoRA_Stacks:
     CATEGORY = "Efficiency Nodes/XY Inputs"
 
     def xy_value(self, node_state, lora_stack_1=None, lora_stack_2=None, lora_stack_3=None, lora_stack_4=None, lora_stack_5=None):
-        xy_type = "LoRA Stacks"
+        xy_type = "LoRA"
         xy_value = [stack for stack in [lora_stack_1, lora_stack_2, lora_stack_3, lora_stack_4, lora_stack_5] if stack is not None]
         if not xy_value or not any(xy_value) or node_state == "Disabled":
             return (None,)
@@ -3994,6 +3926,216 @@ class TSC_ImageOverlay:
         return (base_image,)
 
 ########################################################################################################################
+# Noise Sources & Seed Variations
+# https://github.com/shiimizu/ComfyUI_smZNodes
+# https://github.com/chrisgoringe/cg-noise
+
+# TSC Noise Sources & Variations Script
+class TSC_Noise_Control_Script:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "rng_source": (["cpu", "gpu", "nv"],),
+                "cfg_denoiser": ("BOOLEAN", {"default": False}),
+                "add_seed_noise": ("BOOLEAN", {"default": False}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "weight": ("FLOAT", {"default": 0.015, "min": 0, "max": 1, "step": 0.001})},
+            "optional": {"script": ("SCRIPT",)}
+        }
+
+    RETURN_TYPES = ("SCRIPT",)
+    RETURN_NAMES = ("SCRIPT",)
+    FUNCTION = "noise_control"
+    CATEGORY = "Efficiency Nodes/Scripts"
+
+    def noise_control(self, rng_source, cfg_denoiser, add_seed_noise, seed, weight, script=None):
+        script = script or {}
+        script["noise"] = (rng_source, cfg_denoiser, add_seed_noise, seed, weight)
+        return (script,)
+
+########################################################################################################################
+# Add controlnet options if have controlnet_aux installed (https://github.com/Fannovel16/comfyui_controlnet_aux)
+use_controlnet_widget = preprocessor_widget = (["_"],)
+if os.path.exists(os.path.join(custom_nodes_dir, "comfyui_controlnet_aux")):
+    printout = "Attempting to add Control Net options to the 'HiRes-Fix Script' Node (comfyui_controlnet_aux add-on)..."
+    #print(f"{message('Efficiency Nodes:')} {printout}", end="", flush=True)
+
+    try:
+        with suppress_output():
+            AIO_Preprocessor = getattr(import_module("comfyui_controlnet_aux.__init__"), 'AIO_Preprocessor')
+        use_controlnet_widget = ("BOOLEAN", {"default": False})
+        preprocessor_widget = AIO_Preprocessor.INPUT_TYPES()["optional"]["preprocessor"]
+        print(f"\r{message('Efficiency Nodes:')} {printout}{success('Success!')}")
+    except Exception:
+        print(f"\r{message('Efficiency Nodes:')} {printout}{error('Failed!')}")
+
+# TSC HighRes-Fix with model latent upscalers (https://github.com/city96/SD-Latent-Upscaler)
+class TSC_HighRes_Fix:
+
+    default_latent_upscalers = LatentUpscaleBy.INPUT_TYPES()["required"]["upscale_method"][0]
+
+    city96_upscale_methods =\
+        ["city96." + ver for ver in city96_latent_upscaler.LatentUpscaler.INPUT_TYPES()["required"]["latent_ver"][0]]
+    city96_scalings_raw = city96_latent_upscaler.LatentUpscaler.INPUT_TYPES()["required"]["scale_factor"][0]
+    city96_scalings_float = [float(scale) for scale in city96_scalings_raw]
+
+    ttl_nn_upscale_methods = \
+        ["ttl_nn." + ver for ver in
+         ttl_nn_latent_upscaler.NNLatentUpscale.INPUT_TYPES()["required"]["version"][0]]
+
+    latent_upscalers = default_latent_upscalers + city96_upscale_methods + ttl_nn_upscale_methods
+    pixel_upscalers = folder_paths.get_filename_list("upscale_models")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+
+        return {"required": {"upscale_type": (["latent","pixel"],),
+                             "hires_ckpt_name": (["(use same)"] + folder_paths.get_filename_list("checkpoints"),),
+                             "latent_upscaler": (cls.latent_upscalers,),
+                             "pixel_upscaler": (cls.pixel_upscalers,),
+                             "upscale_by": ("FLOAT", {"default": 1.25, "min": 0.01, "max": 8.0, "step": 0.05}),
+                             "use_same_seed": ("BOOLEAN", {"default": True}),
+                             "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                             "hires_steps": ("INT", {"default": 12, "min": 1, "max": 10000}),
+                             "denoise": ("FLOAT", {"default": .56, "min": 0.00, "max": 1.00, "step": 0.01}),
+                             "iterations": ("INT", {"default": 1, "min": 0, "max": 5, "step": 1}),
+                             "use_controlnet": use_controlnet_widget,
+                             "control_net_name": (folder_paths.get_filename_list("controlnet"),),
+                             "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01}),
+                             "preprocessor": preprocessor_widget,
+                             "preprocessor_imgs": ("BOOLEAN", {"default": False})
+                             },
+                "optional": {"script": ("SCRIPT",)},
+                "hidden": {"my_unique_id": "UNIQUE_ID"}
+                }
+
+    RETURN_TYPES = ("SCRIPT",)
+    FUNCTION = "hires_fix_script"
+    CATEGORY = "Efficiency Nodes/Scripts"
+
+    def hires_fix_script(self, upscale_type, hires_ckpt_name, latent_upscaler, pixel_upscaler, upscale_by,
+                         use_same_seed, seed, hires_steps, denoise, iterations, use_controlnet, control_net_name,
+                         strength, preprocessor, preprocessor_imgs, script=None, my_unique_id=None):
+        latent_upscale_function = None
+        latent_upscale_model = None
+        pixel_upscale_model = None
+
+        def float_to_string(num):
+            if num == int(num):
+                return "{:.1f}".format(num)
+            else:
+                return str(num)
+
+        if iterations > 0 and upscale_by > 0:
+            if upscale_type == "latent":
+                # For latent methods from city96
+                if latent_upscaler in self.city96_upscale_methods:
+                    # Remove extra characters added
+                    latent_upscaler = latent_upscaler.replace("city96.", "")
+
+                    # Set function to city96_latent_upscaler.LatentUpscaler
+                    latent_upscale_function = city96_latent_upscaler.LatentUpscaler
+
+                    # Find the nearest valid scaling in city96_scalings_float
+                    nearest_scaling = min(self.city96_scalings_float, key=lambda x: abs(x - upscale_by))
+
+                    # Retrieve the index of the nearest scaling
+                    nearest_scaling_index = self.city96_scalings_float.index(nearest_scaling)
+
+                    # Use the index to get the raw string representation
+                    nearest_scaling_raw = self.city96_scalings_raw[nearest_scaling_index]
+
+                    upscale_by = float_to_string(upscale_by)
+
+                    # Check if the input upscale_by value was different from the nearest valid value
+                    if upscale_by != nearest_scaling_raw:
+                        print(f"{warning('HighRes-Fix Warning:')} "
+                              f"When using 'city96.{latent_upscaler}', 'upscale_by' must be one of {self.city96_scalings_raw}.\n"
+                              f"Rounding to the nearest valid value ({nearest_scaling_raw}).\033[0m")
+                        upscale_by = nearest_scaling_raw
+
+                # For ttl upscale methods
+                elif latent_upscaler in self.ttl_nn_upscale_methods:
+                    # Remove extra characters added
+                    latent_upscaler = latent_upscaler.replace("ttl_nn.", "")
+
+                    # Bound to min/max limits
+                    upscale_by_clamped = min(max(upscale_by, 1), 2)
+                    if upscale_by != upscale_by_clamped:
+                        print(f"{warning('HighRes-Fix Warning:')} "
+                              f"When using 'ttl_nn.{latent_upscaler}', 'upscale_by' must be between 1 and 2.\n"
+                              f"Rounding to the nearest valid value ({upscale_by_clamped}).\033[0m")
+                    upscale_by = upscale_by_clamped
+
+                    latent_upscale_function = ttl_nn_latent_upscaler.NNLatentUpscale
+
+                # For default upscale methods
+                elif latent_upscaler in self.default_latent_upscalers:
+                    latent_upscale_function = LatentUpscaleBy
+
+                else: # Default
+                    latent_upscale_function = LatentUpscaleBy
+                    latent_upscaler = self.default_latent_upscalers[0]
+                    print(f"{warning('HiResFix Script Warning:')} Chosen latent upscale method not found! "
+                          f"defaulting to '{latent_upscaler}'.\n")
+
+                # Load Checkpoint if defined
+                if hires_ckpt_name == "(use same)":
+                    clear_cache(my_unique_id, 0, "ckpt")
+                else:
+                    latent_upscale_model, _, _ = \
+                        load_checkpoint(hires_ckpt_name, my_unique_id, output_vae=False, cache=1, cache_overwrite=True)
+
+            elif upscale_type == "pixel":
+                pixel_upscale_model = UpscaleModelLoader().load_model(pixel_upscaler)[0]
+
+        control_net = ControlNetLoader().load_controlnet(control_net_name)[0] if use_controlnet is True else None
+
+        # Construct the script output
+        script = script or {}
+        script["hiresfix"] = (upscale_type, latent_upscaler, upscale_by, use_same_seed, seed, hires_steps,
+                              denoise, iterations, control_net, strength, preprocessor, preprocessor_imgs,
+                              latent_upscale_function, latent_upscale_model, pixel_upscale_model)
+
+        return (script,)
+
+########################################################################################################################
+# TSC Tiled Upscaler (https://github.com/BlenderNeko/ComfyUI_TiledKSampler)
+class TSC_Tiled_Upscaler:
+    @classmethod
+    def INPUT_TYPES(cls):
+        # Split the list based on the keyword "tile"
+        cnet_tile_filenames = [name for name in folder_paths.get_filename_list("controlnet") if "tile" in name]
+        #cnet_other_filenames = [name for name in folder_paths.get_filename_list("controlnet") if "tile" not in name]
+
+        return {"required": {"upscale_by": ("FLOAT", {"default": 1.25, "min": 0.01, "max": 8.0, "step": 0.05}),
+                             "tile_size": ("INT", {"default": 512, "min": 256, "max": MAX_RESOLUTION, "step": 64}),
+                             "tiling_strategy": (["random", "random strict", "padded", 'simple', 'none'],),
+                             "tiling_steps": ("INT", {"default": 30, "min": 1, "max": 10000}),
+                             "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                             "denoise": ("FLOAT", {"default": .4, "min": 0.0, "max": 1.0, "step": 0.01}),
+                             "use_controlnet": ("BOOLEAN", {"default": False}),
+                             "tile_controlnet": (cnet_tile_filenames,),
+                             "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01}),
+                             },
+                "optional": {"script": ("SCRIPT",)}}
+
+    RETURN_TYPES = ("SCRIPT",)
+    FUNCTION = "tiled_sampling"
+    CATEGORY = "Efficiency Nodes/Scripts"
+
+    def tiled_sampling(self, upscale_by, tile_size, tiling_strategy, tiling_steps, seed, denoise,
+                       use_controlnet, tile_controlnet, strength, script=None):
+        if tiling_strategy != 'none':
+            script = script or {}
+            tile_controlnet = ControlNetLoader().load_controlnet(tile_controlnet)[0] if use_controlnet else None
+
+            script["tile"] = (upscale_by, tile_size, tiling_strategy, tiling_steps, seed, denoise, tile_controlnet, strength)
+        return (script,)
+
+########################################################################################################################
 # NODE MAPPING
 NODE_CLASS_MAPPINGS = {
     "KSampler (Efficient)": TSC_KSampler,
@@ -4006,7 +4148,6 @@ NODE_CLASS_MAPPINGS = {
     "Apply ControlNet Stack": TSC_Apply_ControlNet_Stack,
     "Unpack SDXL Tuple": TSC_Unpack_SDXL_Tuple,
     "Pack SDXL Tuple": TSC_Pack_SDXL_Tuple,
-    #"Refiner Extras": TSC_SDXL_Refiner_Extras, # MAYBE FUTURE
     "XY Plot": TSC_XYplot,
     "XY Input: Seeds++ Batch": TSC_XYplot_SeedsBatch,
     "XY Input: Add/Return Noise": TSC_XYplot_AddReturnNoise,
@@ -4028,146 +4169,54 @@ NODE_CLASS_MAPPINGS = {
     "XY Input: Manual XY Entry": TSC_XYplot_Manual_XY_Entry,
     "Manual XY Entry Info": TSC_XYplot_Manual_XY_Entry_Info,
     "Join XY Inputs of Same Type": TSC_XYplot_JoinInputs,
-    "Image Overlay": TSC_ImageOverlay
+    "Image Overlay": TSC_ImageOverlay,
+    "Noise Control Script": TSC_Noise_Control_Script,
+    "HighRes-Fix Script": TSC_HighRes_Fix,
+    "Tiled Upscaler Script": TSC_Tiled_Upscaler
 }
 
 ########################################################################################################################
-# HirRes Fix Script with model latent upscaler (https://github.com/city96/SD-Latent-Upscaler)
-city96_latent_upscaler = None
-city96_latent_upscaler_path = os.path.join(custom_nodes_dir, "SD-Latent-Upscaler")
-if os.path.exists(city96_latent_upscaler_path):
-    printout = "Adding City96's 'SD-Latent-Upscaler' selections to the 'HighRes-Fix' node..."
+# Add AnimateDiff Script based off Kosinkadink's Nodes (https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved)
+if os.path.exists(os.path.join(custom_nodes_dir, "ComfyUI-AnimateDiff-Evolved")):
+    printout = "Attempting to add 'AnimatedDiff Script' Node (ComfyUI-AnimateDiff-Evolved add-on)..."
     print(f"{message('Efficiency Nodes:')} {printout}", end="")
     try:
-        city96_latent_upscaler = import_module("SD-Latent-Upscaler.comfy_latent_upscaler")
-        print(f"\r{message('Efficiency Nodes:')} {printout}{success('Success!')}")
-    except ImportError:
-        print(f"\r{message('Efficiency Nodes:')} {printout}{error('Failed!')}")
-
-# TSC HighRes-Fix
-class TSC_HighRes_Fix:
-
-    default_upscale_methods = LatentUpscaleBy.INPUT_TYPES()["required"]["upscale_method"][0]
-    city96_upscale_methods = list()
-
-    if city96_latent_upscaler:
-        city96_upscale_methods = ["SD-Latent-Upscaler." + ver for ver in city96_latent_upscaler.LatentUpscaler.INPUT_TYPES()["required"]["latent_ver"][0]]
-        city96_scalings_raw = city96_latent_upscaler.LatentUpscaler.INPUT_TYPES()["required"]["scale_factor"][0]
-        city96_scalings_float = [float(scale) for scale in city96_scalings_raw]
-    upscale_methods = default_upscale_methods + city96_upscale_methods
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {"latent_upscale_method": (cls.upscale_methods,),
-                            "upscale_by": ("FLOAT", {"default": 1.25, "min": 0.01, "max": 8.0, "step": 0.25}),
-                            "hires_steps": ("INT", {"default": 12, "min": 1, "max": 10000}),
-                            "denoise": ("FLOAT", {"default": .56, "min": 0.0, "max": 1.0, "step": 0.01}),
-                            "iterations": ("INT", {"default": 1, "min": 0, "max": 5, "step": 1}),
-                             },
-                "optional": {"script": ("SCRIPT",)}}
-
-    RETURN_TYPES = ("SCRIPT",)
-    FUNCTION = "hires_fix_script"
-    CATEGORY = "Efficiency Nodes/Scripts"
-
-    def hires_fix_script(self, latent_upscale_method, upscale_by, hires_steps, denoise, iterations, script=None):
-        upscale_function = None
-
-        def float_to_string(num):
-            if num == int(num):
-                return "{:.1f}".format(num)
-            else:
-                return str(num)
-
-        if iterations > 0:
-            # For latent methods from SD-Latent-Upscaler
-            if latent_upscale_method in self.city96_upscale_methods:
-                # Remove extra characters added
-                latent_upscale_method = latent_upscale_method.replace("SD-Latent-Upscaler.", "")
-
-                # Set function to city96_latent_upscaler.LatentUpscaler
-                upscale_function = city96_latent_upscaler.LatentUpscaler
-
-                # Find the nearest valid scaling in city96_scalings_float
-                nearest_scaling = min(self.city96_scalings_float, key=lambda x: abs(x - upscale_by))
-
-                # Retrieve the index of the nearest scaling
-                nearest_scaling_index = self.city96_scalings_float.index(nearest_scaling)
-
-                # Use the index to get the raw string representation
-                nearest_scaling_raw = self.city96_scalings_raw[nearest_scaling_index]
-
-                upscale_by = float_to_string(upscale_by)
-
-                # Check if the input upscale_by value was different from the nearest valid value
-                if upscale_by != nearest_scaling_raw:
-                    print(f"{warning('HighRes-Fix Warning:')} "
-                          f"When using 'SD-Latent-Upscaler.{latent_upscale_method}', 'upscale_by' must be one of {self.city96_scalings_raw}.\n"
-                          f"Rounding to the nearest valid value ({nearest_scaling_raw}).\033[0m")
-                    upscale_by = nearest_scaling_raw
-
-            # For default upscale methods
-            elif latent_upscale_method in self.default_upscale_methods:
-                upscale_function = LatentUpscaleBy
-
-            else: # Default
-                upscale_function = LatentUpscaleBy
-                latent_upscale_method = self.default_upscale_methods[0]
-                print(f"{warning('HiResFix Script Warning:')} Chosen latent upscale method not found! "
-                      f"defaulting to '{latent_upscale_method}'.\n")
-
-            # Construct the script output
-            script = script or {}
-            script["hiresfix"] = (latent_upscale_method, upscale_by, hires_steps, denoise, iterations, upscale_function)
-
-        return (script,)
-
-NODE_CLASS_MAPPINGS.update({"HighRes-Fix Script": TSC_HighRes_Fix})
-
-########################################################################################################################
-'''
-# Tiled Sampling KSamplers (https://github.com/BlenderNeko/ComfyUI_TiledKSampler)
-blenderneko_tiled_ksampler_path = os.path.join(custom_nodes_dir, "ComfyUI_TiledKSampler")
-if os.path.exists(blenderneko_tiled_ksampler_path):
-    printout = "Importing BlenderNeko's 'ComfyUI_TiledKSampler' to enable the 'Tiled Sampling' node..."
-    print(f"{message('Efficiency Nodes:')} {printout}", end="")
-    try:
-        blenderneko_tiled_nodes = import_module("ComfyUI_TiledKSampler.nodes")
+        module = import_module("ComfyUI-AnimateDiff-Evolved.animatediff.nodes")
+        AnimateDiffLoaderWithContext = getattr(module, 'AnimateDiffLoaderWithContext')
+        AnimateDiffCombine = getattr(module, 'AnimateDiffCombine_Deprecated')
         print(f"\r{message('Efficiency Nodes:')} {printout}{success('Success!')}")
 
-        # TSC Tiled Upscaler
-        class TSC_Tiled_Upscaler:
+        # TSC AnimatedDiff Script (https://github.com/BlenderNeko/ComfyUI_TiledKSampler)
+        class TSC_AnimateDiff_Script:
             @classmethod
             def INPUT_TYPES(cls):
-                # Split the list based on the keyword "tile"
-                cnet_tile_filenames = [name for name in folder_paths.get_filename_list("controlnet") if "tile" in name]
-                cnet_other_filenames = [name for name in folder_paths.get_filename_list("controlnet") if "tile" not in name]
-                
-                return {"required": {"tile_controlnet": (cnet_tile_filenames + cnet_other_filenames,),
-                                     "upscale_by": ("FLOAT", {"default": 1.25, "min": 0.01, "max": 8.0, "step": 0.25}),
-                                     "tile_size": ("INT", {"default": 512, "min": 256, "max": MAX_RESOLUTION, "step": 64}),
-                                     "tiling_strategy": (["random", "random strict", "padded", 'simple', 'none'],),
-                                     "tiling_steps": ("INT", {"default": 30, "min": 1, "max": 10000}),
-                                     "denoise": ("FLOAT", {"default": .56, "min": 0.0, "max": 1.0, "step": 0.01}),
-                                     },
-                        "optional": {"script": ("SCRIPT",)}}
+
+                return {"required": {
+                            "motion_model": AnimateDiffLoaderWithContext.INPUT_TYPES()["required"]["model_name"],
+                            "beta_schedule": AnimateDiffLoaderWithContext.INPUT_TYPES()["required"]["beta_schedule"],
+                            "frame_rate": AnimateDiffCombine.INPUT_TYPES()["required"]["frame_rate"],
+                            "loop_count": AnimateDiffCombine.INPUT_TYPES()["required"]["loop_count"],
+                            "format": AnimateDiffCombine.INPUT_TYPES()["required"]["format"],
+                            "pingpong": AnimateDiffCombine.INPUT_TYPES()["required"]["pingpong"],
+                            "save_image": AnimateDiffCombine.INPUT_TYPES()["required"]["save_image"]},
+                        "optional": {"context_options": ("CONTEXT_OPTIONS",)}
+                }
 
             RETURN_TYPES = ("SCRIPT",)
-            FUNCTION = "tiled_sampling"
+            FUNCTION = "animatediff"
             CATEGORY = "Efficiency Nodes/Scripts"
 
-            def tiled_sampling(self, upscale_by, tile_controlnet, tile_size, tiling_strategy, tiling_steps, denoise, script=None):
-                if tiling_strategy != 'none':
-                    script = script or {}
-                    script["tile"] = (upscale_by, ControlNetLoader().load_controlnet(tile_controlnet)[0],
-                                      tile_size, tiling_strategy, tiling_steps, denoise, blenderneko_tiled_nodes)
+            def animatediff(self, motion_model, beta_schedule, frame_rate, loop_count, format, pingpong, save_image,
+                            script=None, context_options=None):
+                script = script or {}
+                script["anim"] = (motion_model, beta_schedule, context_options, frame_rate, loop_count, format, pingpong, save_image)
                 return (script,)
 
-        NODE_CLASS_MAPPINGS.update({"Tiled Upscaler Script": TSC_Tiled_Upscaler})
+        NODE_CLASS_MAPPINGS.update({"AnimateDiff Script": TSC_AnimateDiff_Script})
 
-    except ImportError:
+    except Exception:
         print(f"\r{message('Efficiency Nodes:')} {printout}{error('Failed!')}")
-'''
+
 ########################################################################################################################
 # Simpleeval Nodes (https://github.com/danthedeckie/simpleeval)
 try:

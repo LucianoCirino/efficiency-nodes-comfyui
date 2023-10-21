@@ -1,13 +1,10 @@
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
-const ext = {
+app.registerExtension({
     name: "efficiency.previewfix",
-    ws: null,
-    maxCount: 0,
-    currentCount: 0,
-    sendBlob: false,
-    startProcessing: false,
-    lastBlobURL: null,
+    lastExecutedNodeId: null,
+    blobsToRevoke: [], // Array to accumulate blob URLs for revocation
     debug: false,
 
     log(...args) {
@@ -18,89 +15,53 @@ const ext = {
         if (this.debug) console.error(...args);
     },
 
-    async sendBlobDataAsDataURL(blobURL) {
-        const blob = await fetch(blobURL).then(res => res.blob());
-        const reader = new FileReader();
-        reader.readAsDataURL(blob);
-        reader.onloadend = () => this.ws.send(reader.result);
-    },
+    shouldRevokeBlobForNode(nodeId) {
+        const node = app.graph.getNodeById(nodeId);
+        
+        const validTitles = [
+            "KSampler (Efficient)",
+            "KSampler Adv. (Efficient)",
+            "KSampler SDXL (Eff.)"
+        ];
 
-    handleCommandMessage(data) {
-        Object.assign(this, {
-            maxCount: data.maxCount,
-            sendBlob: data.sendBlob,
-            startProcessing: data.startProcessing,
-            currentCount: 0
-        });
-
-        if (!this.startProcessing && this.lastBlobURL) {
-            this.log("[BlobURLLogger] Revoking last Blob URL:", this.lastBlobURL);
-            URL.revokeObjectURL(this.lastBlobURL);
-            this.lastBlobURL = null;
+        if (!node || !validTitles.includes(node.title)) {
+            return false;
         }
+
+        const getValue = name => ((node.widgets || []).find(w => w.name === name) || {}).value;
+        return getValue("preview_method") !== "none" && getValue("vae_decode").includes("true");
     },
 
-    init() {
-        this.log("[BlobURLLogger] Initializing...");
-
-        this.ws = new WebSocket('ws://127.0.0.1:8288');
-
-        this.ws.addEventListener('open', () => this.log('[BlobURLLogger] WebSocket connection opened.'));
-        this.ws.addEventListener('error', err => this.error('[BlobURLLogger] WebSocket Error:', err));
-        this.ws.addEventListener('message', (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                if (data.maxCount !== undefined && data.sendBlob !== undefined && data.startProcessing !== undefined) {
-                    this.handleCommandMessage(data);
-                }
-            } catch (err) {
-                this.error('[BlobURLLogger] Error parsing JSON:', err);
-            }
-        });
-
+    setup() {
+        // Intercepting blob creation to store and immediately revoke the last blob URL
         const originalCreateObjectURL = URL.createObjectURL;
         URL.createObjectURL = (object) => {
-            const blobURL = originalCreateObjectURL.call(this, object);
-            if (blobURL.startsWith('blob:') && this.startProcessing) {
+            const blobURL = originalCreateObjectURL(object);
+            if (blobURL.startsWith('blob:')) {
                 this.log("[BlobURLLogger] Blob URL created:", blobURL);
-                this.lastBlobURL = blobURL;
-                if (this.sendBlob && this.currentCount < this.maxCount) {
-                    this.sendBlobDataAsDataURL(blobURL);
+                
+                // If the current node meets the criteria, add the blob URL to the revocation list
+                if (this.shouldRevokeBlobForNode(this.lastExecutedNodeId)) {
+                    this.blobsToRevoke.push(blobURL);
                 }
-                this.currentCount++;
             }
             return blobURL;
         };
 
-        this.log("[BlobURLLogger] Hook attached.");
-    }
-};
-
-function toggleWidgetVisibility(node, widgetName, isVisible) {
-    const widget = node.widgets.find(w => w.name === widgetName);
-    if (widget) {
-        widget.visible = isVisible;
-        node.setDirtyCanvas(true);
-    }
-}
-
-function handleLoraNameChange(node, loraNameWidget) {
-    const isNone = loraNameWidget.value === "None";
-    toggleWidgetVisibility(node, "lora_model_strength", !isNone);
-    toggleWidgetVisibility(node, "lora_clip_strength", !isNone);
-}
-
-app.registerExtension({
-    ...ext,
-    nodeCreated(node) {
-        if (node.getTitle() === "Efficient Loader") {
-            const loraNameWidget = node.widgets.find(w => w.name === "lora_name");
-            if (loraNameWidget) {
-                handleLoraNameChange(node, loraNameWidget);
-                loraNameWidget.onChange = function() {
-                    handleLoraNameChange(node, this);
-                };
+        // Listen to the start of the node execution to revoke all accumulated blob URLs
+        api.addEventListener("executing", ({ detail }) => {
+            if (this.lastExecutedNodeId !== detail || detail === null) {
+                this.blobsToRevoke.forEach(blob => {
+                    this.log("[BlobURLLogger] Revoking Blob URL:", blob);
+                    URL.revokeObjectURL(blob);
+                });
+                this.blobsToRevoke = []; // Clear the list after revoking all blobs
             }
-        }
-    }
+            
+            // Update the last executed node ID
+            this.lastExecutedNodeId = detail;
+        });
+
+        this.log("[BlobURLLogger] Hook attached.");
+    },
 });
