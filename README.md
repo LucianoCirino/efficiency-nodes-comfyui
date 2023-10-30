@@ -1,3 +1,5 @@
+⚠️ **IMPORTANT:** Due to shifts in priorities and a decreased interest in this project from my end, this repository will no longer receive updates or maintenance. Use at your own risk...
+
 Efficiency Nodes for ComfyUI
 =======
 ### A collection of <a href="https://github.com/comfyanonymous/ComfyUI" >ComfyUI</a> custom nodes to help streamline workflows and reduce total node count.
