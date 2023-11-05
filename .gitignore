@@ -1,0 +1,86 @@
+# Compiled source #
+###################
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+
+# Packages #
+############
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+
+# Logs #
+########
+*.log
+*.out
+
+# PyCharm #
+############
+.idea/
+
+# Virtual environment #
+#######################
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+ENV.bak/
+
+# Jupyter Notebook #
+####################
+.ipynb_checkpoints/
+
+# Byte-compiled / optimized / DLL files #
+########################################
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions #
+################
+*.so
+
+# Distribution / packaging #
+#############################
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Sphinx documentation #
+#########################
+docs/_build/
+
+# Pytest #
+##########
+pytest_cache/
+
+# Ignore local settings #
+#########################
+local_settings.py
+
+# Ignore compiled Python #
+##########################
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore macOS metadata #
+#########################
+.DS_Store
+
+# Ignore Windows metadata #
+###########################
+Thumbs.db
+ehthumbs.db
+Desktop.ini
