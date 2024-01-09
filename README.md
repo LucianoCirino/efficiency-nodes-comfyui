@@ -1,4 +1,6 @@
-⚠️ **IMPORTANT:** Due to shifts in priorities and a decreased interest in this project from my end, this repository will no longer receive updates or maintenance. Use at your own risk...
+⚠️ **IMPORTANT:** This repository is no longer receiving updates or maintenance. Use at your own risk.
+
+🌟 **Looking for Active Development?** Check out the fork of this project maintained by [jags111](https://github.com/jags111/efficiency-nodes-comfyui).
 
 Efficiency Nodes for ComfyUI
 =======
